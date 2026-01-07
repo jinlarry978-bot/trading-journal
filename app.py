@@ -523,32 +523,83 @@ with tab3:
             else:
                 st.warning("查無資料，請檢查代號是否正確。")
 
+# === Tab 4: 資產透視 (更新：增加庫存篩選) ===
 with tab4:
     st.markdown("### 💰 資產透視")
-    view_filter = st.radio("顯示市場", ["全部", "台股僅見", "美股僅見"], horizontal=True)
+    
+    # 建立兩欄佈局：左邊選市場，右邊選是否只看庫存
+    filter_col1, filter_col2 = st.columns([2, 1])
+    with filter_col1:
+        view_filter = st.radio("顯示市場", ["全部", "台股僅見", "美股僅見"], horizontal=True)
+    with filter_col2:
+        st.write("") # 排版用空行
+        st.write("") 
+        # 新增開關：只顯示庫存
+        show_only_held = st.checkbox("只顯示目前持倉 (隱藏已出清)", value=False)
+    
     df_raw = load_data()
+    
     if not df_raw.empty:
-        if "台股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'TW']
-        elif "美股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'US']
+        # 1. 先篩選市場
+        if "台股" in view_filter: 
+            df_raw = df_raw[df_raw['Market'] == 'TW']
+        elif "美股" in view_filter: 
+            df_raw = df_raw[df_raw['Market'] == 'US']
+            
         if not df_raw.empty:
+            # 計算所有數據
             p_df, t_mkt, t_unreal, t_real, m_df = calculate_full_portfolio(df_raw)
+            
+            # 2. 如果勾選「只顯示持倉」，則過濾 p_df 表格
+            if show_only_held:
+                p_df = p_df[p_df['庫存'] > 0]
+            
+            # --- 上方 KPI 指標 (維持顯示總體狀況，不受表格篩選影響) ---
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("總市值", f"${t_mkt:,.0f}")
-            k2.metric("未實現損益", f"${t_unreal:,.0f}", delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", delta_color="normal")
-            k3.metric("已實現+股息", f"${t_real:,.0f}")
-            k4.metric("總損益", f"${(t_unreal+t_real):,.0f}")
+            k2.metric("未實現損益", f"${t_unreal:,.0f}", 
+                      delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", 
+                      delta_color="normal")
+            k3.metric("已實現+股息", f"${t_real:,.0f}") # 這是歷史累積賺的，還是顯示出來讓您開心
+            k4.metric("總損益 (未+已)", f"${(t_unreal+t_real):,.0f}")
+            
             st.markdown("---")
+            
+            # --- 圖表區 ---
             g1, g2 = st.columns([1, 1])
             with g1:
-                if not p_df[p_df['市值']>0].empty:
-                    fig_pie = px.pie(p_df[p_df['市值']>0], values='市值', names='名稱', hole=0.4, title="持倉分布")
+                # 圓餅圖本來就只畫市值>0的，所以不受影響
+                if not p_df.empty and p_df[p_df['市值']>0].shape[0] > 0:
+                    fig_pie = px.pie(p_df[p_df['市值']>0], values='市值', names='名稱', 
+                                     hole=0.4, title="現有持倉分佈")
                     st.plotly_chart(fig_pie, use_container_width=True)
+                else:
+                    st.info("目前無持倉市值可畫圖")
+            
             with g2:
+                # 月損益圖是看歷史，所以維持顯示
                 if not m_df.empty:
                     m_df['Color'] = m_df['PnL'].apply(lambda x: '#D32F2F' if x >= 0 else '#2E7D32')
-                    fig_bar = px.bar(m_df, x='Month', y='PnL', text_auto='.0s', title="每月損益")
+                    fig_bar = px.bar(m_df, x='Month', y='PnL', text_auto='.0s', title="每月已實現損益")
                     fig_bar.update_traces(marker_color=m_df['Color'])
                     st.plotly_chart(fig_bar, use_container_width=True)
-            st.dataframe(p_df.style.format("{:,.0f}", subset=["庫存", "市值", "未實現", "已實現+息"]).format("{:.2f}", subset=["均價", "現價"]).map(lambda x: 'color: #D32F2F; font-weight:bold' if x > 0 else 'color: #2E7D32; font-weight:bold', subset=['未實現']), use_container_width=True)
-        else: st.info("該市場無資料")
-    else: st.info("尚無資料")
+                else:
+                    st.info("尚無已實現損益")
+            
+            # --- 詳細表格 (受 Checkbox 控制) ---
+            st.subheader("📋 資產明細表")
+            if not p_df.empty:
+                st.dataframe(
+                    p_df.style
+                    .format("{:,.0f}", subset=["庫存", "市值", "未實現", "已實現+息"])
+                    .format("{:.2f}", subset=["均價", "現價"])
+                    .map(lambda x: 'color: #D32F2F; font-weight:bold' if x > 0 else 'color: #2E7D32; font-weight:bold', subset=['未實現']),
+                    use_container_width=True
+                )
+            else:
+                st.info("沒有符合條件的持倉資料。")
+                
+        else: 
+            st.info("該市場目前無任何交易紀錄")
+    else: 
+        st.info("資料庫尚無資料")
