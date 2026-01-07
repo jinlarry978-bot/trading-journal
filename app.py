@@ -9,6 +9,7 @@ import yfinance as yf
 import time
 import datetime
 import io
+import re # 用於正則表達式處理日期
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
@@ -32,8 +33,7 @@ st.markdown("""
 SHEET_TW = "TW_Trades"
 SHEET_US = "US_Trades"
 
-# --- 內建熱門股字典 (防呆用) ---
-# 當 Excel 沒填且 Yahoo 抓不到時，優先查這裡
+# 內建熱門股字典
 KNOWN_STOCKS = {
     '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息', 
     '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '006208': '富邦台50',
@@ -90,6 +90,47 @@ def save_data(row_data):
         st.error(f"寫入失敗: {e}")
         return False
 
+# --- 核心更新：萬能日期標準化函數 ---
+def standardize_date(date_val):
+    """
+    將各種奇怪的日期格式 (Excel數字、斜線、點號、民國年)
+    統一轉為 YYYY-MM-DD 字串
+    """
+    try:
+        if pd.isna(date_val) or str(date_val).strip() == "":
+            return None
+            
+        # 1. 處理 Excel 序列號 (例如 45300.0)
+        if isinstance(date_val, (int, float)):
+            # Excel 的基準日通常是 1899-12-30
+            dt = datetime.datetime(1899, 12, 30) + datetime.timedelta(days=date_val)
+            return dt.strftime("%Y-%m-%d")
+            
+        date_str = str(date_val).strip()
+        
+        # 2. 處理已經是 Timestamp 物件的情況
+        if isinstance(date_val, (pd.Timestamp, datetime.date, datetime.datetime)):
+            return date_val.strftime("%Y-%m-%d")
+
+        # 3. 處理 "2024.01.01" 或 "2024/1/1"
+        date_str = date_str.replace('.', '-').replace('/', '-')
+        
+        # 4. 處理民國年 (例如 113-01-01)
+        if '-' in date_str:
+            parts = date_str.split('-')
+            if len(parts) == 3:
+                y, m, d = parts
+                if len(y) <= 3 and int(y) < 1900: # 判定為民國年
+                    y = str(int(y) + 1911)
+                    date_str = f"{y}-{m}-{d}"
+        
+        # 嘗試轉換
+        dt = pd.to_datetime(date_str)
+        return dt.strftime("%Y-%m-%d")
+        
+    except:
+        return None # 真的無法辨識才回傳 None
+
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -109,10 +150,14 @@ def batch_save_data_smart(rows, market_type):
                 p = safe_float(r.get('價格', 0))
                 q = safe_float(r.get('股數', 0))
                 s = str(r.get('代號', '')).strip()
-                sig = (str(r['日期']), s, str(r['類別']), p, q)
+                # 這裡也要標準化日期以確保比對正確
+                d = standardize_date(r.get('日期', ''))
+                sig = (d, s, str(r['類別']), p, q)
                 existing_signatures.add(sig)
         
         for row in rows:
+            # row: [日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅, 總金額]
+            # row[0] 已經在匯入迴圈中被 standardize_date 處理過了
             new_sig = (str(row[0]), str(row[2]), str(row[1]), float(row[4]), float(row[5]))
             if new_sig in existing_signatures: duplicate_count += 1
             else:
@@ -129,24 +174,20 @@ def batch_save_data_smart(rows, market_type):
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 (核心修改：加入字典查詢) ---
+# --- 3. 股票資訊 ---
 def get_stock_info(symbol):
     try:
-        # 1. 標準化代號
         symbol = str(symbol).strip().upper()
         clean_symbol = symbol
-        
         if symbol.isdigit():
             clean_symbol = symbol.zfill(4) 
             query_symbol = f"{clean_symbol}.TW"
         else:
             query_symbol = clean_symbol
             
-        # 2. 【新功能】先查內建字典 (最快最準)
         if clean_symbol in KNOWN_STOCKS:
             return query_symbol, KNOWN_STOCKS[clean_symbol], 0, 0
             
-        # 3. 字典沒有才去問 Yahoo
         stock = yf.Ticker(query_symbol)
         try:
             info = stock.info
@@ -158,12 +199,10 @@ def get_stock_info(symbol):
             name = clean_symbol
             pe = 0
             yield_rate = 0
-        
         return query_symbol, name, pe, yield_rate
-    except: 
-        return symbol, "查無名稱", 0, 0
+    except: return symbol, "查無名稱", 0, 0
 
-# --- 4. 技術分析 (防呆修正) ---
+# --- 4. 技術分析 ---
 def calculate_technicals(df):
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
@@ -199,13 +238,11 @@ def analyze_full_signal(symbol):
     try:
         clean_sym = str(symbol).strip().upper()
         if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
-        
         if clean_sym.isdigit(): query_symbol = f"{clean_sym}.TW"
         else: query_symbol = clean_sym
             
         stock = yf.Ticker(query_symbol)
         df = stock.history(period="1y")
-        
         if len(df) < 60: return None, None
         
         df = calculate_technicals(df)
@@ -230,9 +267,7 @@ def analyze_full_signal(symbol):
             pe = info.get('trailingPE', 0)
             yield_rate = info.get('dividendYield', 0)
             if yield_rate: yield_rate *= 100
-        except:
-            pe = 0
-            yield_rate = 0
+        except: pe = 0; yield_rate = 0
         
         analysis = {
             "signal": signal, "color": color, "reasons": reasons,
@@ -253,7 +288,16 @@ def calculate_full_portfolio(df):
     portfolio = {}
     monthly_pnl = {}
     
-    df['日期'] = pd.to_datetime(df['日期'])
+    # 核心修正：使用 apply + standardize_date 來清洗所有日期
+    # 不再直接 to_datetime，而是先標準化格式，確保不漏資料
+    df['日期'] = df['日期'].apply(standardize_date)
+    
+    # 標準化後再轉 datetime，這時候應該格式都很完美了
+    df['日期'] = pd.to_datetime(df['日期'], errors='coerce') 
+    
+    # 如果真的還有無法辨識的 (比如日期填了 "abc")，才刪除
+    df = df.dropna(subset=['日期'])
+    
     df = df.sort_values(by='日期')
     
     for _, row in df.iterrows():
@@ -377,7 +421,10 @@ with tab1:
             clean_sym = rsym.replace('.TW', '') 
             if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
             
-            if save_data([str(idate), type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
+            # 使用標準化日期確保單筆輸入格式一致
+            std_date = standardize_date(idate)
+            
+            if save_data([std_date, type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
                 st.success(f"已儲存至 {'台股' if is_tw_stock(rsym) else '美股'} 分頁")
 
 # Tab 2: 匯入
@@ -412,6 +459,8 @@ with tab2:
                 df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
             
             df_u = df_u.dropna(how='all')
+            # 使用標準化檢查日期欄位
+            df_u['日期'] = df_u['日期'].apply(standardize_date)
             df_u = df_u.dropna(subset=['日期'])
             
             tw_rows = []
@@ -427,14 +476,12 @@ with tab2:
                 else:
                     clean_sym = raw_sym
                 
-                # 名稱邏輯修正：先看 Excel -> 再看字典 -> 最後問 Yahoo
                 excel_name = str(r.get('名稱', '')).strip()
                 if excel_name and excel_name.lower() != 'nan':
                     name = excel_name
                 else:
-                    # 這裡會去呼叫包含 KNOWN_STOCKS 的新函數
                     query_sym = f"{clean_sym}.TW" if clean_sym.isdigit() else clean_sym
-                    _, name, _, _ = get_stock_info(clean_sym) 
+                    _, name, _, _ = get_stock_info(query_sym)
                 
                 tt_raw = str(r['類別'])
                 tt = "買入" if any(x in tt_raw for x in ["Buy","買"]) else "賣出" if any(x in tt_raw for x in ["Sell","賣"]) else "股息"
@@ -446,6 +493,7 @@ with tab2:
                 
                 amt = -(q*p+f) if "買" in tt else (q*p-f-t) if "賣" in tt else p
                 
+                # 使用已經標準化過的日期 r['日期']
                 row_data = [str(r['日期']), tt, clean_sym, name, p, q, f, t, amt]
                 
                 if is_tw_stock(clean_sym): tw_rows.append(row_data)
@@ -517,7 +565,8 @@ with tab3:
                 fig.add_trace(go.Bar(x=hist.index, y=hist['MACD_Hist'], marker_color=colors, name='MACD'), row=3, col=1)
                 fig.update_layout(height=700, template="plotly_white", xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
-            else: st.warning("查無資料")
+            else:
+                st.warning("查無資料，請檢查代號是否正確。")
 
 with tab4:
     st.markdown("### 💰 資產透視")
