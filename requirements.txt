@@ -5,3 +5,4 @@ gspread
 oauth2client
 yfinance
 openpyxl
+google-generativeai
