@@ -14,7 +14,7 @@ import re
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
 
-# --- 2. CSS 美化工程 (含手機 RWD 優化) ---
+# --- 2. CSS 美化工程 (含暗黑模式修復) ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -23,9 +23,29 @@ st.markdown("""
         font-family: 'Inter', sans-serif;
     }
 
-    .stApp { background-color: #F8F9FA; }
+    /* === 核心修復：強制淺色模式 (Forced Light Mode) === */
+    /* 無論手機是否開暗黑模式，強制背景為淺灰，文字為深黑 */
+    [data-testid="stAppViewContainer"] {
+        background-color: #F8F9FA !important;
+        color: #212529 !important;
+    }
+    [data-testid="stHeader"] {
+        background-color: rgba(0,0,0,0) !important; /* 透明置頂列 */
+    }
+    [data-testid="stSidebar"] {
+        background-color: #FFFFFF !important;
+    }
+    /* 強制所有標題與文字顏色 */
+    h1, h2, h3, p, span, div {
+        color: #212529 !important;
+    }
+    /* 修正輸入框在暗黑模式下的顯示 */
+    .stTextInput input, .stNumberInput input, .stSelectbox div {
+        color: #212529 !important;
+        background-color: #FFFFFF !important;
+    }
 
-    /* === 卡片通用樣式 === */
+    /* === KPI 卡片樣式 === */
     .kpi-card {
         background: linear-gradient(135deg, #FFFFFF 0%, #FFFFFF 100%);
         border: 1px solid #E9ECEF;
@@ -37,7 +57,6 @@ st.markdown("""
         flex-direction: column;
         justify-content: center;
         transition: all 0.3s ease;
-        /* 手機版堆疊時增加下距 */
         margin-bottom: 10px; 
     }
     .kpi-card:hover {
@@ -48,20 +67,20 @@ st.markdown("""
     
     .kpi-label {
         font-size: 14px;
-        color: #6C757D;
+        color: #6C757D !important; /* 標籤維持灰色 */
         font-weight: 600;
         text-transform: uppercase;
         margin-bottom: 6px;
     }
     .kpi-value-main {
-        font-size: 26px; /* 電腦版字體 */
+        font-size: 26px;
         font-weight: 800;
-        color: #212529;
+        color: #212529 !important;
         line-height: 1.1;
     }
     .kpi-value-sub {
         font-size: 15px;
-        color: #ADB5BD;
+        color: #ADB5BD !important;
         font-weight: 500;
         margin-top: 4px;
     }
@@ -74,10 +93,10 @@ st.markdown("""
         width: fit-content;
     }
 
-    /* 漲跌顏色定義 */
-    .delta-pos { color: #D93535; background-color: rgba(217, 53, 53, 0.08); }
-    .delta-neg { color: #35A853; background-color: rgba(53, 168, 83, 0.08); }
-    .delta-neutral { color: #6C757D; background-color: rgba(108, 117, 125, 0.08); }
+    /* 漲跌顏色定義 (強制顏色，避免被暗黑模式反轉) */
+    .delta-pos { color: #D93535 !important; background-color: rgba(217, 53, 53, 0.08) !important; }
+    .delta-neg { color: #35A853 !important; background-color: rgba(53, 168, 83, 0.08) !important; }
+    .delta-neutral { color: #6C757D !important; background-color: rgba(108, 117, 125, 0.08) !important; }
 
     /* === 策略卡片 === */
     .strategy-card {
@@ -88,21 +107,16 @@ st.markdown("""
         background-color: white;
         border: 1px solid #E9ECEF;
     }
-    .strategy-title { margin: 0; color: #495057; font-weight: 700; font-size: 15px; }
-    .strategy-signal { margin: 8px 0; font-weight: 800; font-size: 20px; }
-    .strategy-desc { font-size: 13px; color: #868E96; margin: 0; }
+    .strategy-title { margin: 0; color: #495057 !important; font-weight: 700; font-size: 15px; }
+    .strategy-signal { margin: 8px 0; font-weight: 800; font-size: 20px; color: #212529 !important; }
+    .strategy-desc { font-size: 13px; color: #868E96 !important; margin: 0; }
 
-    /* === 📱 手機版專用優化 (RWD Media Query) === */
+    /* === 📱 手機版專用優化 (RWD) === */
     @media (max-width: 640px) {
-        /* 縮小 KPI 主數字 */
         .kpi-value-main { font-size: 22px !important; }
-        /* 縮小卡片內距，節省空間 */
         .kpi-card { padding: 15px !important; }
-        /* 調整卡片標題 */
         .kpi-label { font-size: 12px !important; }
-        /* 策略卡片緊湊化 */
         .strategy-signal { font-size: 18px !important; }
-        /* 隱藏部分不重要的裝飾邊距 */
         .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
     }
     
