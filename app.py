@@ -37,6 +37,7 @@ SHEET_US = "US_Trades"
 KNOWN_STOCKS = {
     '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息', 
     '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '006208': '富邦台50',
+    '00940': '元大台灣價值高息', '00939': '統一台灣高息動能',
     '2330': '台積電', '2317': '鴻海', '2454': '聯發科', '2303': '聯電',
     '2881': '富邦金', '2882': '國泰金', '2891': '中信金', '2886': '兆豐金',
     '2884': '玉山金', '2412': '中華電', '1101': '台泥', '2002': '中鋼',
@@ -90,11 +91,31 @@ def save_data(row_data):
         st.error(f"寫入失敗: {e}")
         return False
 
-# --- 日期標準化函數 ---
+# --- 核心更新：代號標準化函數 (支援去除單引號與正確補零) ---
+def standardize_symbol(symbol):
+    """
+    將代號標準化：
+    1. 移除單引號 ' (處理 Excel 文字格式 '00878)
+    2. 移除空白
+    3. 針對純數字補零：
+       - 878 -> 00878 (3碼補2個0)
+       - 50  -> 0050  (2碼補2個0)
+       - 2330 -> 2330 (4碼不變)
+    """
+    # 1. 強制轉字串並移除單引號與空白
+    s = str(symbol).replace("'", "").strip().upper()
+    
+    # 2. 如果剩下的是純數字，進行智慧補零
+    if s.isdigit():
+        if len(s) == 3: return "00" + s # 878 -> 00878
+        if len(s) == 2: return "00" + s # 50 -> 0050
+        if len(s) < 4: return s.zfill(4) # 其他少於4碼的預設補零
+        
+    return s
+
 def standardize_date(date_val):
     try:
-        if pd.isna(date_val) or str(date_val).strip() == "":
-            return None
+        if pd.isna(date_val) or str(date_val).strip() == "": return None
         if isinstance(date_val, (int, float)):
             dt = datetime.datetime(1899, 12, 30) + datetime.timedelta(days=date_val)
             return dt.strftime("%Y-%m-%d")
@@ -113,7 +134,6 @@ def standardize_date(date_val):
         return dt.strftime("%Y-%m-%d")
     except: return None
 
-# --- 批次寫入 (直通模式：不去重) ---
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -125,23 +145,19 @@ def batch_save_data_smart(rows, market_type):
             sheet.append_rows(rows)
             st.cache_data.clear()
             return True, len(rows), 0
-        else:
-            return True, 0, 0
-
+        else: return True, 0, 0
     except Exception as e:
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 ---
+# --- 3. 股票資訊 (使用標準化函數) ---
 def get_stock_info(symbol):
     try:
-        symbol = str(symbol).strip().upper()
-        clean_symbol = symbol
-        if symbol.isdigit():
-            clean_symbol = symbol.zfill(4) 
-            query_symbol = f"{clean_symbol}.TW"
-        else:
-            query_symbol = clean_symbol
+        # 使用新的標準化邏輯 (去除單引號 + 補零)
+        clean_symbol = standardize_symbol(symbol)
+        
+        if clean_symbol.isdigit(): query_symbol = f"{clean_symbol}.TW"
+        else: query_symbol = clean_symbol
             
         if clean_symbol in KNOWN_STOCKS:
             return query_symbol, KNOWN_STOCKS[clean_symbol], 0, 0
@@ -194,8 +210,8 @@ def calculate_technicals(df):
 
 def analyze_full_signal(symbol):
     try:
-        clean_sym = str(symbol).strip().upper()
-        if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
+        clean_sym = standardize_symbol(symbol)
+        
         if clean_sym.isdigit(): query_symbol = f"{clean_sym}.TW"
         else: query_symbol = clean_sym
             
@@ -235,38 +251,33 @@ def analyze_full_signal(symbol):
         return df, analysis
     except: return None, None
 
-# --- 5. 資產計算 (核心修正：強制排序邏輯) ---
+# --- 5. 資產計算 ---
 def safe_float(val):
     try:
         if pd.isna(val) or val == "": return 0.0
         return float(val)
     except: return 0.0
 
-# 新增：交易類別權重，確保同一天 先買(1) -> 後賣(2)
 def get_sort_rank(t_type):
     t_type = str(t_type)
-    if "Buy" in t_type or "買" in t_type or "配股" in t_type: return 1 # 最優先
-    if "Sell" in t_type or "賣" in t_type: return 2 # 其次
-    return 3 # 股息最後
+    if "Buy" in t_type or "買" in t_type or "配股" in t_type: return 1
+    if "Sell" in t_type or "賣" in t_type: return 2
+    return 3
 
 def calculate_full_portfolio(df):
     portfolio = {}
     monthly_pnl = {}
     
-    # 1. 日期標準化
     df['日期'] = df['日期'].apply(standardize_date)
     df['日期'] = pd.to_datetime(df['日期'], errors='coerce') 
     df = df.dropna(subset=['日期'])
     
-    # 2. 關鍵修正：產生排序權重 (Sort Rank)
     df['Rank'] = df['類別'].apply(get_sort_rank)
-    
-    # 3. 排序：先按日期，同一天按權重 (先買後賣)
     df = df.sort_values(by=['日期', 'Rank'])
     
     for _, row in df.iterrows():
-        sym = str(row['代號']).strip().upper()
-        if sym.isdigit(): sym = sym.zfill(4)
+        # 這裡也要應用標準化，確保資料庫取出的代號被正確補零
+        sym = standardize_symbol(row['代號'])
         
         name = row['名稱']
         qty = safe_float(row['股數'])
@@ -300,13 +311,10 @@ def calculate_full_portfolio(df):
                 p['Qty'] -= qty
                 p['Cost'] -= cost_sold
             else:
-                # 若庫存為 0 仍發生賣出 (理論上排序後不該發生，除非放空)
-                # 這裡做個簡單處理：視為無成本賣出，全額計入獲利，庫存變負
                 revenue = (qty * price) - fees - tax
                 p['Realized'] += revenue
                 monthly_pnl[date_str] += revenue
                 p['Qty'] -= qty
-                
         elif is_div:
             p['Div'] += price
             monthly_pnl[date_str] += price
@@ -334,7 +342,6 @@ def calculate_full_portfolio(df):
     
     for sym, v in portfolio.items():
         cp = curr_prices.get(sym, 0)
-        # 修正極小誤差
         if abs(v['Qty']) < 0.001: v['Qty'] = 0
         
         mkt = v['Qty'] * cp
@@ -344,7 +351,6 @@ def calculate_full_portfolio(df):
         tot_unreal += unreal
         tot_real += (v['Realized'] + v['Div'])
         
-        # 只要有交易過就列入計算，但在顯示時會被 filter 過濾
         if v['Qty'] != 0 or v['Realized']!=0 or v['Div']!=0:
             res.append({
                 "代號": sym, "名稱": v['Name'], "庫存": v['Qty'], "均價": v['Cost']/v['Qty'] if v['Qty']>0 else 0,
@@ -376,8 +382,7 @@ with tab1:
         name = "..."
         rsym = isym
         if isym: 
-            check_sym = str(isym).strip().upper()
-            if check_sym.isdigit(): check_sym = check_sym.zfill(4)
+            check_sym = standardize_symbol(isym)
             rsym, name, _, _ = get_stock_info(check_sym)
         
         st.info(f"股票: **{name}**")
@@ -393,7 +398,7 @@ with tab1:
         if st.button("送出", type="primary"):
             type_val = "買入" if "買" in itype else "賣出" if "賣" in itype else "股息"
             clean_sym = rsym.replace('.TW', '') 
-            if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
+            clean_sym = standardize_symbol(clean_sym)
             
             std_date = standardize_date(idate)
             
@@ -442,11 +447,8 @@ with tab2:
             total = len(df_u)
             
             for i, (index, r) in enumerate(df_u.iterrows()):
-                raw_sym = str(r['代號']).strip().upper()
-                if raw_sym.isdigit():
-                    clean_sym = raw_sym.zfill(4)
-                else:
-                    clean_sym = raw_sym
+                # 使用標準化函數處理代號
+                clean_sym = standardize_symbol(r['代號'])
                 
                 excel_name = str(r.get('名稱', '')).strip()
                 if excel_name and excel_name.lower() != 'nan':
@@ -503,8 +505,7 @@ with tab3:
         inventory = {}
         names = {}
         for _, row in df_raw.iterrows():
-            sym = str(row['代號']).strip().upper()
-            if sym.isdigit(): sym = sym.zfill(4)
+            sym = standardize_symbol(row['代號'])
             tt = str(row['類別'])
             q = safe_float(row['股數'])
             if "買" in tt or "Buy" in tt or "股" in tt: inventory[sym] = inventory.get(sym, 0) + q
