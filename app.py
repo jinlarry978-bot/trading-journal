@@ -113,7 +113,7 @@ def standardize_date(date_val):
         return dt.strftime("%Y-%m-%d")
     except: return None
 
-# --- 核心修改：移除重複檢查邏輯 ---
+# --- 批次寫入 (直通模式：不去重) ---
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -121,12 +121,10 @@ def batch_save_data_smart(rows, market_type):
         target_sheet_name = SHEET_TW if market_type == 'TW' else SHEET_US
         sheet = spreadsheet.worksheet(target_sheet_name)
         
-        # 移除讀取現有資料比對的邏輯
-        # 直接寫入所有傳入的資料 (rows)
         if rows:
             sheet.append_rows(rows)
             st.cache_data.clear()
-            return True, len(rows), 0 # 0 代表沒有被過濾的
+            return True, len(rows), 0
         else:
             return True, 0, 0
 
@@ -237,22 +235,34 @@ def analyze_full_signal(symbol):
         return df, analysis
     except: return None, None
 
-# --- 5. 資產計算 ---
+# --- 5. 資產計算 (核心修正：強制排序邏輯) ---
 def safe_float(val):
     try:
         if pd.isna(val) or val == "": return 0.0
         return float(val)
     except: return 0.0
 
+# 新增：交易類別權重，確保同一天 先買(1) -> 後賣(2)
+def get_sort_rank(t_type):
+    t_type = str(t_type)
+    if "Buy" in t_type or "買" in t_type or "配股" in t_type: return 1 # 最優先
+    if "Sell" in t_type or "賣" in t_type: return 2 # 其次
+    return 3 # 股息最後
+
 def calculate_full_portfolio(df):
     portfolio = {}
     monthly_pnl = {}
     
+    # 1. 日期標準化
     df['日期'] = df['日期'].apply(standardize_date)
     df['日期'] = pd.to_datetime(df['日期'], errors='coerce') 
     df = df.dropna(subset=['日期'])
     
-    df = df.sort_values(by='日期')
+    # 2. 關鍵修正：產生排序權重 (Sort Rank)
+    df['Rank'] = df['類別'].apply(get_sort_rank)
+    
+    # 3. 排序：先按日期，同一天按權重 (先買後賣)
+    df = df.sort_values(by=['日期', 'Rank'])
     
     for _, row in df.iterrows():
         sym = str(row['代號']).strip().upper()
@@ -289,6 +299,14 @@ def calculate_full_portfolio(df):
                 monthly_pnl[date_str] += profit
                 p['Qty'] -= qty
                 p['Cost'] -= cost_sold
+            else:
+                # 若庫存為 0 仍發生賣出 (理論上排序後不該發生，除非放空)
+                # 這裡做個簡單處理：視為無成本賣出，全額計入獲利，庫存變負
+                revenue = (qty * price) - fees - tax
+                p['Realized'] += revenue
+                monthly_pnl[date_str] += revenue
+                p['Qty'] -= qty
+                
         elif is_div:
             p['Div'] += price
             monthly_pnl[date_str] += price
@@ -316,6 +334,7 @@ def calculate_full_portfolio(df):
     
     for sym, v in portfolio.items():
         cp = curr_prices.get(sym, 0)
+        # 修正極小誤差
         if abs(v['Qty']) < 0.001: v['Qty'] = 0
         
         mkt = v['Qty'] * cp
@@ -325,7 +344,8 @@ def calculate_full_portfolio(df):
         tot_unreal += unreal
         tot_real += (v['Realized'] + v['Div'])
         
-        if v['Qty'] > 0 or v['Realized']!=0 or v['Div']!=0:
+        # 只要有交易過就列入計算，但在顯示時會被 filter 過濾
+        if v['Qty'] != 0 or v['Realized']!=0 or v['Div']!=0:
             res.append({
                 "代號": sym, "名稱": v['Name'], "庫存": v['Qty'], "均價": v['Cost']/v['Qty'] if v['Qty']>0 else 0,
                 "現價": cp, "市值": mkt, "未實現": unreal, "已實現+息": v['Realized']+v['Div']
@@ -375,7 +395,6 @@ with tab1:
             clean_sym = rsym.replace('.TW', '') 
             if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
             
-            # 使用標準化日期確保單筆輸入格式一致
             std_date = standardize_date(idate)
             
             if save_data([std_date, type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
@@ -413,7 +432,6 @@ with tab2:
                 df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
             
             df_u = df_u.dropna(how='all')
-            # 使用標準化檢查日期欄位
             df_u['日期'] = df_u['日期'].apply(standardize_date)
             df_u = df_u.dropna(subset=['日期'])
             
@@ -447,7 +465,6 @@ with tab2:
                 
                 amt = -(q*p+f) if "買" in tt else (q*p-f-t) if "賣" in tt else p
                 
-                # 使用已經標準化過的日期 r['日期']
                 row_data = [str(r['日期']), tt, clean_sym, name, p, q, f, t, amt]
                 
                 if is_tw_stock(clean_sym): tw_rows.append(row_data)
@@ -462,7 +479,6 @@ with tab2:
             
             msg = ""
             if tw_rows:
-                # 這裡調用的已是修正後的 batch_save_data_smart (無去重功能)
                 _, added_tw, dup_tw = batch_save_data_smart(tw_rows, 'TW')
                 msg += f"🇹🇼 台股: 新增 {added_tw} 筆。 "
             if us_rows:
@@ -476,7 +492,7 @@ with tab2:
             
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
-# Tab 3 & 4 (維持不變)
+# Tab 3 (保持不變)
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
     market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
@@ -523,83 +539,45 @@ with tab3:
             else:
                 st.warning("查無資料，請檢查代號是否正確。")
 
-# === Tab 4: 資產透視 (更新：增加庫存篩選) ===
 with tab4:
     st.markdown("### 💰 資產透視")
-    
-    # 建立兩欄佈局：左邊選市場，右邊選是否只看庫存
     filter_col1, filter_col2 = st.columns([2, 1])
     with filter_col1:
         view_filter = st.radio("顯示市場", ["全部", "台股僅見", "美股僅見"], horizontal=True)
     with filter_col2:
-        st.write("") # 排版用空行
+        st.write("")
         st.write("") 
-        # 新增開關：只顯示庫存
         show_only_held = st.checkbox("只顯示目前持倉 (隱藏已出清)", value=False)
     
     df_raw = load_data()
-    
     if not df_raw.empty:
-        # 1. 先篩選市場
-        if "台股" in view_filter: 
-            df_raw = df_raw[df_raw['Market'] == 'TW']
-        elif "美股" in view_filter: 
-            df_raw = df_raw[df_raw['Market'] == 'US']
-            
+        if "台股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'TW']
+        elif "美股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'US']
         if not df_raw.empty:
-            # 計算所有數據
             p_df, t_mkt, t_unreal, t_real, m_df = calculate_full_portfolio(df_raw)
+            if show_only_held: p_df = p_df[p_df['庫存'] > 0]
             
-            # 2. 如果勾選「只顯示持倉」，則過濾 p_df 表格
-            if show_only_held:
-                p_df = p_df[p_df['庫存'] > 0]
-            
-            # --- 上方 KPI 指標 (維持顯示總體狀況，不受表格篩選影響) ---
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("總市值", f"${t_mkt:,.0f}")
-            k2.metric("未實現損益", f"${t_unreal:,.0f}", 
-                      delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", 
-                      delta_color="normal")
-            k3.metric("已實現+股息", f"${t_real:,.0f}") # 這是歷史累積賺的，還是顯示出來讓您開心
-            k4.metric("總損益 (未+已)", f"${(t_unreal+t_real):,.0f}")
-            
+            k2.metric("未實現損益", f"${t_unreal:,.0f}", delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", delta_color="normal")
+            k3.metric("已實現+股息", f"${t_real:,.0f}")
+            k4.metric("總損益", f"${(t_unreal+t_real):,.0f}")
             st.markdown("---")
-            
-            # --- 圖表區 ---
             g1, g2 = st.columns([1, 1])
             with g1:
-                # 圓餅圖本來就只畫市值>0的，所以不受影響
                 if not p_df.empty and p_df[p_df['市值']>0].shape[0] > 0:
-                    fig_pie = px.pie(p_df[p_df['市值']>0], values='市值', names='名稱', 
-                                     hole=0.4, title="現有持倉分佈")
+                    fig_pie = px.pie(p_df[p_df['市值']>0], values='市值', names='名稱', hole=0.4, title="現有持倉分佈")
                     st.plotly_chart(fig_pie, use_container_width=True)
-                else:
-                    st.info("目前無持倉市值可畫圖")
-            
+                else: st.info("目前無持倉市值可畫圖")
             with g2:
-                # 月損益圖是看歷史，所以維持顯示
                 if not m_df.empty:
                     m_df['Color'] = m_df['PnL'].apply(lambda x: '#D32F2F' if x >= 0 else '#2E7D32')
                     fig_bar = px.bar(m_df, x='Month', y='PnL', text_auto='.0s', title="每月已實現損益")
                     fig_bar.update_traces(marker_color=m_df['Color'])
                     st.plotly_chart(fig_bar, use_container_width=True)
-                else:
-                    st.info("尚無已實現損益")
-            
-            # --- 詳細表格 (受 Checkbox 控制) ---
             st.subheader("📋 資產明細表")
             if not p_df.empty:
-                st.dataframe(
-                    p_df.style
-                    .format("{:,.0f}", subset=["庫存", "市值", "未實現", "已實現+息"])
-                    .format("{:.2f}", subset=["均價", "現價"])
-                    .map(lambda x: 'color: #D32F2F; font-weight:bold' if x > 0 else 'color: #2E7D32; font-weight:bold', subset=['未實現']),
-                    use_container_width=True
-                )
-            else:
-                st.info("沒有符合條件的持倉資料。")
-                
-        else: 
-            st.info("該市場目前無任何交易紀錄")
-    else: 
-        st.info("資料庫尚無資料")
+                st.dataframe(p_df.style.format("{:,.0f}", subset=["庫存", "市值", "未實現", "已實現+息"]).format("{:.2f}", subset=["均價", "現價"]).map(lambda x: 'color: #D32F2F; font-weight:bold' if x > 0 else 'color: #2E7D32; font-weight:bold', subset=['未實現']), use_container_width=True)
+            else: st.info("沒有符合條件的持倉資料。")
+        else: st.info("該市場目前無任何交易紀錄")
+    else: st.info("資料庫尚無資料")
