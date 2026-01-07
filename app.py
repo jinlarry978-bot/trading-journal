@@ -8,6 +8,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import yfinance as yf
 import time
 import datetime
+import io # 新增 IO 模組處理 Excel 串流
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
@@ -67,7 +68,7 @@ def save_data(row_data):
     try:
         client = init_connection()
         spreadsheet = client.open("TradeLog")
-        symbol = row_data[2] # "代號" 在第3欄 (Index 2)
+        symbol = row_data[2]
         
         target_sheet = SHEET_TW if is_tw_stock(symbol) else SHEET_US
         sheet = spreadsheet.worksheet(target_sheet)
@@ -94,13 +95,10 @@ def batch_save_data_smart(rows, market_type):
         existing_signatures = set()
         if not existing_df.empty:
             for _, r in existing_df.iterrows():
-                # 建立指紋 (日期+代號+類別+價格+股數)
-                # 對應中文欄位: 日期, 代號, 類別, 價格, 股數
                 sig = (str(r['日期']), str(r['代號']), str(r['類別']), float(r['價格']), float(r['股數']))
                 existing_signatures.add(sig)
         
         for row in rows:
-            # row 順序: [日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅, 總金額]
             new_sig = (str(row[0]), str(row[2]), str(row[1]), float(row[4]), float(row[5]))
             
             if new_sig in existing_signatures:
@@ -206,13 +204,11 @@ def analyze_full_signal(symbol):
         return df, analysis
     except: return None, {}, 0, 0
 
-# --- 5. 資產計算 (核心修改：使用中文欄位) ---
+# --- 5. 資產計算 ---
 def calculate_full_portfolio(df):
     portfolio = {}
     monthly_pnl = {}
     
-    # 對應中文欄位
-    # Date -> 日期
     df['日期'] = pd.to_datetime(df['日期'])
     df = df.sort_values(by='日期')
     
@@ -225,7 +221,7 @@ def calculate_full_portfolio(df):
         price = float(row['價格'])
         fees = float(row['手續費'])
         tax = float(row['交易稅'])
-        t_type = str(row['類別']) # 可能包含 "Buy", "Sell", "買入", "賣出"
+        t_type = str(row['類別'])
         date_str = row['日期'].strftime("%Y-%m")
         
         if sym not in portfolio:
@@ -234,7 +230,6 @@ def calculate_full_portfolio(df):
             
         p = portfolio[sym]
         
-        # 智慧判斷類別 (支援中英文)
         is_buy = any(x in t_type for x in ["Buy", "買"])
         is_sell = any(x in t_type for x in ["Sell", "賣"])
         is_div = any(x in t_type for x in ["Dividend", "股息", "配息"])
@@ -255,7 +250,7 @@ def calculate_full_portfolio(df):
         elif is_div:
             p['Div'] += price
             monthly_pnl[date_str] += price
-            p['Qty'] += qty # 若配股
+            p['Qty'] += qty
 
     active_syms = [s for s, v in portfolio.items() if v['Qty'] > 0]
     curr_prices = {}
@@ -297,8 +292,13 @@ def calculate_full_portfolio(df):
     m_df = pd.DataFrame(list(monthly_pnl.items()), columns=['Month', 'PnL']).sort_values('Month')
     return pd.DataFrame(res), tot_mkt, tot_unreal, tot_real, m_df
 
-def convert_df(df):
-    return df.to_csv(index=False).encode('utf-8')
+# 新增：轉換為 Excel 的函數
+def convert_to_excel(df):
+    output = io.BytesIO()
+    # 使用 openpyxl 引擎寫入 Excel
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sheet1')
+    return output.getvalue()
 
 # --- 6. 主程式 ---
 st.title("💎 專業投資戰情室 Pro")
@@ -330,36 +330,39 @@ with tab1:
         st.metric("總金額", f"${tot:,.0f}")
         
         if st.button("送出", type="primary"):
-            # 儲存中文標題對應的順序: [日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅, 總金額]
-            # 這裡我們將類別簡化儲存，方便閱讀
             type_val = "買入" if "買" in itype else "賣出" if "賣" in itype else "股息"
             clean_sym = rsym.replace('.TW','')
-            
             if save_data([str(idate), type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
                 st.success(f"已儲存至 {'台股' if is_tw_stock(rsym) else '美股'} 分頁")
 
-# Tab 2: 匯入 (中文欄位版)
+# Tab 2: 匯入 (Excel版)
 with tab2:
-    st.markdown("### 📥 批次匯入 (中文欄位版)")
-    st.info("請下載新的中文範本。CSV 內的「類別」填寫：買入/賣出/股息 或是 Buy/Sell 皆可。")
+    st.markdown("### 📥 批次匯入 (支援 Excel/CSV)")
+    st.info("推薦使用 **Excel (.xlsx)** 格式以避免亂碼問題。")
     
-    # 製作中文範本
+    # 製作中文範本 (Excel)
     template_data = {
-        "日期": ["2024-01-01"], 
-        "類別": ["買入"], 
-        "代號": ["0050"], 
-        "價格": [150], 
-        "股數": [1000], 
-        "手續費": [20], 
-        "交易稅": [0]
+        "日期": ["2024-01-01"], "類別": ["買入"], "代號": ["0050"], 
+        "價格": [150], "股數": [1000], "手續費": [20], "交易稅": [0]
     }
-    st.download_button("下載中文 CSV 範本", convert_df(pd.DataFrame(template_data)), "template_zh.csv", "text/csv")
+    # 下載按鈕改為下載 xlsx
+    st.download_button(
+        label="📥 下載 Excel (.xlsx) 範本",
+        data=convert_to_excel(pd.DataFrame(template_data)),
+        file_name="trade_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     
-    uploaded_file = st.file_uploader("上傳 CSV", type=["csv"])
+    # 支援上傳 csv 和 xlsx
+    uploaded_file = st.file_uploader("上傳檔案", type=["csv", "xlsx"])
+    
     if uploaded_file and st.button("開始匯入"):
         try:
-            # 強制代號讀取為字串
-            df_u = pd.read_csv(uploaded_file, dtype={'代號': str})
+            # 判斷副檔名來決定讀取方式
+            if uploaded_file.name.endswith('.csv'):
+                df_u = pd.read_csv(uploaded_file, dtype={'代號': str})
+            else:
+                df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
             
             tw_rows = []
             us_rows = []
@@ -368,13 +371,11 @@ with tab2:
             total = len(df_u)
             
             for i, r in df_u.iterrows():
-                # 使用中文欄位名稱讀取
                 rs = str(r['代號']).strip().upper()
                 if rs.isdigit() and len(rs)<4: rs = rs.zfill(4)
                 
                 q_sym, name, _, _ = get_stock_info(rs)
                 
-                # 類別判斷
                 tt_raw = str(r['類別'])
                 tt = "買入" if any(x in tt_raw for x in ["Buy","買"]) else "賣出" if any(x in tt_raw for x in ["Sell","賣"]) else "股息"
                 
@@ -384,9 +385,7 @@ with tab2:
                 t = float(r['交易稅'])
                 
                 amt = -(q*p+f) if "買" in tt else (q*p-f-t) if "賣" in tt else p
-                
                 clean_sym = q_sym.replace('.TW', '')
-                # 順序: [日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅, 總金額]
                 row_data = [str(r['日期']), tt, clean_sym, name, p, q, f, t, amt]
                 
                 if is_tw_stock(clean_sym): tw_rows.append(row_data)
@@ -405,7 +404,7 @@ with tab2:
             
             st.success(f"匯入完成！ {msg}")
             
-        except Exception as e: st.error(f"匯入失敗，請檢查 CSV 欄位名稱是否為中文: {str(e)}")
+        except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
 # Tab 3: 趨勢戰情
 with tab3:
@@ -423,8 +422,8 @@ with tab3:
             sym = str(row['代號'])
             tt = str(row['類別'])
             q = float(row['股數'])
-            if "買" in tt or "股" in tt or "Buy" in tt: inventory[sym] = inventory.get(sym, 0) + q
-            elif "賣" in tt or "Sell" in tt: inventory[sym] = inventory.get(sym, 0) - q
+            if "買" in tt or "股" in tt: inventory[sym] = inventory.get(sym, 0) + q
+            elif "賣" in tt: inventory[sym] = inventory.get(sym, 0) - q
             names[sym] = row['名稱']
         
         active_list = [f"{k} {names[k]}" for k, v in inventory.items() if v > 0.1]
