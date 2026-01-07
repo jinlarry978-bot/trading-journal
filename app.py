@@ -10,11 +10,12 @@ import time
 import datetime
 import io
 import re
+import google.generativeai as genai  # AI 核心庫
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
 
-# --- 2. CSS 美化工程 (含暗黑模式修復) ---
+# --- 2. CSS 美化工程 (含暗黑模式修復 + 手機 RWD) ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -23,29 +24,26 @@ st.markdown("""
         font-family: 'Inter', sans-serif;
     }
 
-    /* === 核心修復：強制淺色模式 (Forced Light Mode) === */
-    /* 無論手機是否開暗黑模式，強制背景為淺灰，文字為深黑 */
+    /* === 強制淺色模式 (防止手機暗黑模式導致白字白底) === */
     [data-testid="stAppViewContainer"] {
         background-color: #F8F9FA !important;
         color: #212529 !important;
     }
     [data-testid="stHeader"] {
-        background-color: rgba(0,0,0,0) !important; /* 透明置頂列 */
+        background-color: rgba(0,0,0,0) !important;
     }
     [data-testid="stSidebar"] {
         background-color: #FFFFFF !important;
     }
-    /* 強制所有標題與文字顏色 */
-    h1, h2, h3, p, span, div {
+    h1, h2, h3, h4, h5, h6, p, span, div, label {
         color: #212529 !important;
     }
-    /* 修正輸入框在暗黑模式下的顯示 */
     .stTextInput input, .stNumberInput input, .stSelectbox div {
         color: #212529 !important;
         background-color: #FFFFFF !important;
     }
 
-    /* === KPI 卡片樣式 === */
+    /* === KPI 卡片 === */
     .kpi-card {
         background: linear-gradient(135deg, #FFFFFF 0%, #FFFFFF 100%);
         border: 1px solid #E9ECEF;
@@ -64,10 +62,9 @@ st.markdown("""
         box-shadow: 0 8px 15px rgba(0,0,0,0.05);
         border-color: #CED4DA;
     }
-    
     .kpi-label {
         font-size: 14px;
-        color: #6C757D !important; /* 標籤維持灰色 */
+        color: #6C757D !important;
         font-weight: 600;
         text-transform: uppercase;
         margin-bottom: 6px;
@@ -92,8 +89,6 @@ st.markdown("""
         border-radius: 4px;
         width: fit-content;
     }
-
-    /* 漲跌顏色定義 (強制顏色，避免被暗黑模式反轉) */
     .delta-pos { color: #D93535 !important; background-color: rgba(217, 53, 53, 0.08) !important; }
     .delta-neg { color: #35A853 !important; background-color: rgba(53, 168, 83, 0.08) !important; }
     .delta-neutral { color: #6C757D !important; background-color: rgba(108, 117, 125, 0.08) !important; }
@@ -111,7 +106,19 @@ st.markdown("""
     .strategy-signal { margin: 8px 0; font-weight: 800; font-size: 20px; color: #212529 !important; }
     .strategy-desc { font-size: 13px; color: #868E96 !important; margin: 0; }
 
-    /* === 📱 手機版專用優化 (RWD) === */
+    /* === AI 分析區塊 === */
+    .ai-box {
+        background-color: #F0F4F8;
+        border-left: 5px solid #4285F4;
+        padding: 15px;
+        border-radius: 5px;
+        margin-top: 20px;
+        margin-bottom: 20px;
+        color: #212529 !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+
+    /* === 📱 手機 RWD 優化 === */
     @media (max-width: 640px) {
         .kpi-value-main { font-size: 22px !important; }
         .kpi-card { padding: 15px !important; }
@@ -148,6 +155,13 @@ def init_connection():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
     return gspread.authorize(creds)
+
+# --- Gemini 初始化 ---
+def init_gemini():
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        return True
+    return False
 
 def is_tw_stock(symbol):
     symbol = str(symbol).upper().strip()
@@ -284,30 +298,25 @@ def get_stock_info_extended(symbol):
         return query_symbol, name, fundamentals
     except: return symbol, symbol, {}
 
-# --- 4. 技術分析 ---
+# --- 4. 技術分析 & AI ---
 def calculate_technicals(df):
     df['MA5'] = df['Close'].rolling(window=5).mean()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
-    
     std20 = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['MA20'] + (std20 * 2)
     df['BB_Lower'] = df['MA20'] - (std20 * 2)
-    
     df['VolMA5'] = df['Volume'].rolling(window=5).mean()
-    
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
-    
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
-    
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
     df['RSV'] = (df['Close'] - low_min) / (high_max - low_min) * 100
@@ -322,6 +331,29 @@ def calculate_technicals(df):
     df['K'] = k_list
     df['D'] = d_list
     return df
+
+# AI 分析函式
+def ask_gemini_analyst(symbol, name, data_summary):
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = f"""
+        你是一位專業的台股/美股技術分析師。請根據以下數據，用繁體中文給出一段約 100~150 字的簡短分析與操作建議。
+        
+        股票：{symbol} {name}
+        收盤價：{data_summary['close']:.2f}
+        
+        技術指標：
+        - RSI(14)：{data_summary['rsi']:.1f}
+        - KD值：K={data_summary['k']:.1f}, D={data_summary['d']:.1f}
+        - 均線位置：月線 {data_summary['ma20']:.2f}, 季線 {data_summary['ma60']:.2f}
+        - 布林通道：上軌 {data_summary['bb_u']:.2f}, 下軌 {data_summary['bb_l']:.2f}
+        
+        請用專業但口語的語氣，直接講結論：目前趨勢是偏多還是偏空？操作上建議是買進、觀望還是減碼？
+        """
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI 連線暫時無法使用 ({str(e)})"
 
 def analyze_full_signal(symbol):
     try:
@@ -379,13 +411,20 @@ def analyze_full_signal(symbol):
         else:
             lt_sig = {"txt": "⚪ 盤整", "col": "#6C757D", "desc": "季線附近震盪"}
 
+        # 整理數據給 AI
+        data_summary = {
+            "close": close, "rsi": rsi, "k": k, "d": d,
+            "ma20": ma20, "ma60": ma60,
+            "bb_u": last['BB_Upper'], "bb_l": last['BB_Lower'],
+            "perf_stock": stock_ret, "perf_bench": bench_ret, "perf_diff": perf_diff
+        }
+
         analysis = {
             "st": st_sig, "mt": mt_sig, "lt": lt_sig,
-            "metrics": {
-                "close": close, "rsi": rsi, "k": k, "d": d,
-                "perf_stock": stock_ret, "perf_bench": bench_ret, "perf_diff": perf_diff
-            },
-            "fund": fund
+            "metrics": data_summary,
+            "fund": fund,
+            "name": name,
+            "symbol": q_sym
         }
         return df, analysis, benchmark
     except: return None, None, None
@@ -611,6 +650,18 @@ with tab3:
                 m2.metric("RSI", f"{ana['metrics']['rsi']:.1f}")
                 m3.metric("KD", f"{ana['metrics']['k']:.1f}")
                 m4.metric("vs 0050", f"{ana['metrics']['perf_stock']:.1f}%", f"{ana['metrics']['perf_diff']:+.1f}%")
+                
+                # --- AI 按鈕區 ---
+                has_key = init_gemini()
+                if st.button("🤖 呼叫 AI 分析師 (Gemini)"):
+                    if has_key:
+                        with st.spinner("AI 正在思考中..."):
+                            ai_comment = ask_gemini_analyst(ana['symbol'], ana['name'], ana['metrics'])
+                            st.markdown(f'<div class="ai-box"><b>🤖 AI 分析觀點：</b><br>{ai_comment}</div>', unsafe_allow_html=True)
+                    else:
+                        st.error("請先於 secrets 設定 GEMINI_API_KEY")
+                # -----------------
+
                 st.write(""); s1, s2, s3 = st.columns(3)
                 for col, key, title in zip([s1, s2, s3], ['st', 'mt', 'lt'], ['⚡ 短期', '🌊 中期', '🏔️ 長期']):
                     with col: st.markdown(f"""<div class="strategy-card" style="border-left:5px solid {ana[key]['col']};"><h4 class="strategy-title">{title}</h4><h3 style="margin:5px 0; color:{ana[key]['col']};">{ana[key]['txt']}</h3><p style="font-size:13px; color:#666; margin:0;">{ana[key]['desc']}</p></div>""", unsafe_allow_html=True)
