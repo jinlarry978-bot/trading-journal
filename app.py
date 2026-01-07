@@ -91,26 +91,13 @@ def save_data(row_data):
         st.error(f"寫入失敗: {e}")
         return False
 
-# --- 核心更新：代號標準化函數 (支援去除單引號與正確補零) ---
+# --- 核心更新：代號標準化函數 ---
 def standardize_symbol(symbol):
-    """
-    將代號標準化：
-    1. 移除單引號 ' (處理 Excel 文字格式 '00878)
-    2. 移除空白
-    3. 針對純數字補零：
-       - 878 -> 00878 (3碼補2個0)
-       - 50  -> 0050  (2碼補2個0)
-       - 2330 -> 2330 (4碼不變)
-    """
-    # 1. 強制轉字串並移除單引號與空白
     s = str(symbol).replace("'", "").strip().upper()
-    
-    # 2. 如果剩下的是純數字，進行智慧補零
     if s.isdigit():
-        if len(s) == 3: return "00" + s # 878 -> 00878
-        if len(s) == 2: return "00" + s # 50 -> 0050
-        if len(s) < 4: return s.zfill(4) # 其他少於4碼的預設補零
-        
+        if len(s) == 3: return "00" + s 
+        if len(s) == 2: return "00" + s 
+        if len(s) < 4: return s.zfill(4)
     return s
 
 def standardize_date(date_val):
@@ -150,10 +137,9 @@ def batch_save_data_smart(rows, market_type):
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 (使用標準化函數) ---
+# --- 3. 股票資訊 ---
 def get_stock_info(symbol):
     try:
-        # 使用新的標準化邏輯 (去除單引號 + 補零)
         clean_symbol = standardize_symbol(symbol)
         
         if clean_symbol.isdigit(): query_symbol = f"{clean_symbol}.TW"
@@ -176,26 +162,41 @@ def get_stock_info(symbol):
         return query_symbol, name, pe, yield_rate
     except: return symbol, "查無名稱", 0, 0
 
-# --- 4. 技術分析 ---
+# --- 4. 技術分析 (升級：計算多重均線) ---
 def calculate_technicals(df):
+    # 短期：5日線
+    df['MA5'] = df['Close'].rolling(window=5).mean()
+    # 中期：20日線 (月線)
     df['MA20'] = df['Close'].rolling(window=20).mean()
+    # 長期：60日線 (季線)
     df['MA60'] = df['Close'].rolling(window=60).mean()
+    
+    # 布林通道
+    std20 = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['MA20'] + (std20 * 2)
+    df['BB_Lower'] = df['MA20'] - (std20 * 2)
+    
+    # 5日均量
+    df['VolMA5'] = df['Volume'].rolling(window=5).mean()
+    
+    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
+    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
     
+    # KD
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
     df['RSV'] = (df['Close'] - low_min) / (high_max - low_min) * 100
-    
     k_list, d_list = [], []
     k, d = 50, 50
     for rsv in df['RSV']:
@@ -211,7 +212,6 @@ def calculate_technicals(df):
 def analyze_full_signal(symbol):
     try:
         clean_sym = standardize_symbol(symbol)
-        
         if clean_sym.isdigit(): query_symbol = f"{clean_sym}.TW"
         else: query_symbol = clean_sym
             
@@ -222,20 +222,90 @@ def analyze_full_signal(symbol):
         df = calculate_technicals(df)
         last = df.iloc[-1]
         
-        score = 0
-        reasons = []
-        if last['Close'] > last['MA20']: score += 1; reasons.append("站上月線")
-        if last['MA20'] > last['MA60']: score += 1; reasons.append("均線多頭排列")
-        if last['RSI'] < 30: score += 1; reasons.append("RSI超賣")
-        elif last['RSI'] > 70: score -= 1; reasons.append("RSI超買")
-        if last['MACD_Hist'] > 0 and df.iloc[-2]['MACD_Hist'] < 0: score += 2; reasons.append("MACD 金叉")
-        if last['K'] < 20 and last['K'] > last['D']: score += 1; reasons.append("KD 低檔金叉")
+        # 變數提取
+        close = last['Close']
+        ma5 = last['MA5']
+        ma20 = last['MA20']
+        ma60 = last['MA60']
+        rsi = last['RSI']
+        k, d = last['K'], last['D']
+        macd_hist = last['MACD_Hist']
+        vol = last['Volume']
+        vol_ma5 = last['VolMA5']
         
-        if score >= 3: signal, color = "強勢買進 🔥", "#D32F2F"
-        elif score >= 1: signal, color = "偏多操作 📈", "#E65100"
-        elif score <= -2: signal, color = "建議賣出 📉", "#2E7D32"
-        else: signal, color = "區間震盪 ☁️", "#666666"
+        # --- 策略 1: 短期 (Short-term) ---
+        # 關注：MA5, KD, 量能
+        st_signal = "⚪ 觀望"
+        st_color = "#666666"
+        st_reason = "動能不明"
         
+        if close > ma5 and k > d and vol > vol_ma5:
+            st_signal = "🔴 短線買進"
+            st_color = "#D32F2F"
+            st_reason = "站上5日線+帶量+KD金叉"
+        elif rsi < 25:
+            st_signal = "🔴 搶反彈"
+            st_color = "#D32F2F"
+            st_reason = "RSI嚴重超賣(<25)"
+        elif close < ma5 and k < d:
+            st_signal = "🟢 短線賣出"
+            st_color = "#2E7D32"
+            st_reason = "跌破5日線+KD死叉"
+        elif rsi > 80:
+            st_signal = "🟢 獲利了結"
+            st_color = "#2E7D32"
+            st_reason = "RSI過熱(>80)"
+        else:
+            st_signal = "🟠 持有/觀望"
+            st_color = "#FF9800"
+            st_reason = "短期震盪整理中"
+
+        # --- 策略 2: 中期 (Mid-term) ---
+        # 關注：MA20 (月線), MACD
+        mt_signal = "⚪ 觀望"
+        mt_color = "#666666"
+        mt_reason = "趨勢不明"
+        
+        if close > ma20 and macd_hist > 0:
+            mt_signal = "🔴 波段買進"
+            mt_color = "#D32F2F"
+            mt_reason = "站穩月線+MACD多頭"
+        elif close < ma20 and macd_hist < 0:
+            mt_signal = "🟢 波段賣出"
+            mt_color = "#2E7D32"
+            mt_reason = "跌破月線+MACD空頭"
+        elif close > ma20:
+            mt_signal = "🟠 續抱"
+            mt_color = "#FF9800"
+            mt_reason = "股價於月線之上"
+        else:
+            mt_signal = "⚪ 弱勢整理"
+            mt_color = "#666666"
+            mt_reason = "股價受制於月線"
+
+        # --- 策略 3: 長期 (Long-term) ---
+        # 關注：MA60 (季線), 均線排列
+        lt_signal = "⚪ 觀望"
+        lt_color = "#666666"
+        lt_reason = "長線盤整"
+        
+        # 多頭排列：MA5 > MA20 > MA60
+        is_bull_align = ma5 > ma20 and ma20 > ma60
+        
+        if close > ma60 and is_bull_align:
+            lt_signal = "🔴 長線加碼"
+            lt_color = "#D32F2F"
+            lt_reason = "均線多頭排列+站上季線"
+        elif close > ma60:
+            lt_signal = "🟠 長期持有"
+            lt_color = "#FF9800"
+            lt_reason = "長線趨勢仍向上(季線之上)"
+        elif close < ma60:
+            lt_signal = "🟢 趨勢轉空"
+            lt_color = "#2E7D32"
+            lt_reason = "跌破季線(生命線)"
+
+        # 抓基本面
         try:
             info = stock.info
             pe = info.get('trailingPE', 0)
@@ -244,8 +314,10 @@ def analyze_full_signal(symbol):
         except: pe = 0; yield_rate = 0
         
         analysis = {
-            "signal": signal, "color": color, "reasons": reasons,
-            "close": last['Close'], "rsi": last['RSI'], "k": last['K'], "d": last['D'],
+            "st": {"sig": st_signal, "col": st_color, "res": st_reason},
+            "mt": {"sig": mt_signal, "col": mt_color, "res": mt_reason},
+            "lt": {"sig": lt_signal, "col": lt_color, "res": lt_reason},
+            "close": close, "rsi": rsi, "k": k, "d": d,
             "pe": pe, "yield": yield_rate
         }
         return df, analysis
@@ -276,9 +348,7 @@ def calculate_full_portfolio(df):
     df = df.sort_values(by=['日期', 'Rank'])
     
     for _, row in df.iterrows():
-        # 這裡也要應用標準化，確保資料庫取出的代號被正確補零
         sym = standardize_symbol(row['代號'])
-        
         name = row['名稱']
         qty = safe_float(row['股數'])
         price = safe_float(row['價格'])
@@ -447,7 +517,6 @@ with tab2:
             total = len(df_u)
             
             for i, (index, r) in enumerate(df_u.iterrows()):
-                # 使用標準化函數處理代號
                 clean_sym = standardize_symbol(r['代號'])
                 
                 excel_name = str(r.get('名稱', '')).strip()
@@ -494,7 +563,7 @@ with tab2:
             
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
-# Tab 3 (保持不變)
+# Tab 3 (策略面板 - 三維度升級)
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
     market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
@@ -519,7 +588,7 @@ with tab3:
             manual = st.text_input("或搜尋代號", placeholder="例如 2330")
         target = manual if manual else (sel.split()[0] if sel else None)
         if target:
-            with st.spinner("分析中..."):
+            with st.spinner("AI 多維度分析中..."):
                 hist, ana = analyze_full_signal(target)
             if hist is not None:
                 m1, m2, m3, m4 = st.columns(4)
@@ -527,15 +596,53 @@ with tab3:
                 m2.metric("RSI", f"{ana['rsi']:.1f}")
                 m3.metric("本益比", f"{ana['pe']:.1f}" if ana['pe'] else "-")
                 m4.metric("殖利率", f"{ana['yield']:.2f}%" if ana['yield'] else "-")
-                st.markdown(f"""<div style="background-color:white; padding:10px; border-radius:10px; border:1px solid #ddd; text-align:center; margin-bottom:10px;"><span style="color:{ana['color']}; font-size:24px; font-weight:bold;">{ana['signal']}</span><br><span style="font-size:14px; color:#555;">{' / '.join(ana['reasons'])}</span></div>""", unsafe_allow_html=True)
+                
+                # --- 三欄式策略卡片 (核心亮點) ---
+                st.write("")
+                s1, s2, s3 = st.columns(3)
+                
+                with s1:
+                    st.markdown(f"""
+                    <div style="background-color:white; padding:15px; border-radius:10px; border-left:5px solid {ana['st']['col']}; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                        <h4 style="margin:0; color:#333;">⚡ 短期 (5日線)</h4>
+                        <h3 style="margin:5px 0; color:{ana['st']['col']};">{ana['st']['sig']}</h3>
+                        <p style="font-size:13px; color:#666; margin:0;">{ana['st']['res']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                with s2:
+                    st.markdown(f"""
+                    <div style="background-color:white; padding:15px; border-radius:10px; border-left:5px solid {ana['mt']['col']}; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                        <h4 style="margin:0; color:#333;">🌊 中期 (月線)</h4>
+                        <h3 style="margin:5px 0; color:{ana['mt']['col']};">{ana['mt']['sig']}</h3>
+                        <p style="font-size:13px; color:#666; margin:0;">{ana['mt']['res']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                with s3:
+                    st.markdown(f"""
+                    <div style="background-color:white; padding:15px; border-radius:10px; border-left:5px solid {ana['lt']['col']}; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                        <h4 style="margin:0; color:#333;">🏔️ 長期 (季線)</h4>
+                        <h3 style="margin:5px 0; color:{ana['lt']['col']};">{ana['lt']['sig']}</h3>
+                        <p style="font-size:13px; color:#666; margin:0;">{ana['lt']['res']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.write("")
+
+                # K線圖 (維持豐富資訊)
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2])
+                
                 fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], increasing_line_color='#D32F2F', decreasing_line_color='#2E7D32', name='K線'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='#FF9800'), name='MA20'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Upper'], line=dict(color='rgba(0, 100, 255, 0.3)', width=1), name='布林上軌'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Lower'], line=dict(color='rgba(0, 100, 255, 0.3)', width=1), name='布林下軌', fill='tonexty', fillcolor='rgba(0, 100, 255, 0.05)'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='#FF9800'), name='月線'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['MA60'], line=dict(color='#9C27B0'), name='季線'), row=1, col=1)
+                
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['K'], line=dict(color='#9C27B0'), name='K'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['D'], line=dict(color='#E91E63'), name='D'), row=2, col=1)
                 colors = ['#D32F2F' if v >= 0 else '#2E7D32' for v in hist['MACD_Hist']]
                 fig.add_trace(go.Bar(x=hist.index, y=hist['MACD_Hist'], marker_color=colors, name='MACD'), row=3, col=1)
-                fig.update_layout(height=700, template="plotly_white", xaxis_rangeslider_visible=False, showlegend=False)
+                fig.update_layout(height=800, template="plotly_white", xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("查無資料，請檢查代號是否正確。")
