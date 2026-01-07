@@ -7,39 +7,25 @@ from oauth2client.service_account import ServiceAccountCredentials
 import yfinance as yf
 import time
 
-# --- 1. 頁面設定 (高對比深色主題) ---
+# --- 1. 頁面設定 (改回標準亮色) ---
 st.set_page_config(page_title="專業投資戰情室", layout="wide", page_icon="📈")
 
-# 修正 CSS：強制將卡片內的文字設為白色，背景設為深灰，增加對比度
+# CSS 微調：只優化卡片邊框，保持白底黑字的高對比度
 st.markdown("""
     <style>
-    /* 全局背景與文字修正 */
-    .stApp {
-        background-color: #0E1117;
-        color: #FAFAFA;
-    }
-    
-    /* 指標卡片 (Metric) 樣式 */
+    /* 調整指標卡片 (Metric) 增加邊框與陰影，讓它在白底中突顯 */
     div[data-testid="stMetric"] {
-        background-color: #262730; /* 深灰色背景 */
+        background-color: #F0F2F6; /* 淺灰背景 */
+        border: 1px solid #D6D6D6;
         padding: 15px;
-        border-radius: 8px;
-        border: 1px solid #4f4f4f;
+        border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
     }
     
-    /* 強制指標文字為白色 */
-    div[data-testid="stMetricLabel"] p {
-        color: #d1d1d1 !important; /* 標籤淺灰 */
-        font-size: 14px;
-    }
-    div[data-testid="stMetricValue"] div {
-        color: #ffffff !important; /*數值純白 */
-        font-weight: bold;
-    }
-    
-    /* 表格樣式優化 */
-    div[data-testid="stDataFrame"] {
-        background-color: #262730;
+    /* 讓指標數值更大更清楚 */
+    div[data-testid="stMetricValue"] {
+        font-size: 26px !important;
+        font-weight: bold !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -102,7 +88,10 @@ def get_stock_info(symbol):
 
 def analyze_signal(symbol):
     try:
-        if str(symbol).isdigit(): symbol += ".TW"
+        symbol = str(symbol).strip()
+        if symbol.isdigit() and len(symbol) < 4: symbol = symbol.zfill(4)
+        if symbol.isdigit(): symbol += ".TW"
+            
         stock = yf.Ticker(symbol)
         df = stock.history(period="6mo")
         if len(df) < 60: return None, "資料不足"
@@ -116,17 +105,17 @@ def analyze_signal(symbol):
         df['RSI'] = 100 - (100 / (1 + rs))
         
         last = df.iloc[-1]
-        signal, color = "觀望整理", "#aaaaaa" # 灰色
+        # 台股習慣：紅漲綠跌
+        signal, color = "觀望整理", "#555555" # 灰色
         
-        # 簡易訊號邏輯
         if last['Close'] > last['MA20'] > last['MA60']: 
-            signal, color = "強勢多頭 🔥", "#00ff00" # 亮綠
+            signal, color = "強勢多頭 🔥", "#D32F2F" # 深紅 (漲)
         elif last['Close'] < last['MA20'] < last['MA60']: 
-            signal, color = "空頭走勢 🔻", "#ff4b4b" # 亮紅
+            signal, color = "空頭走勢 🔻", "#2E7D32" # 深綠 (跌)
         elif last['RSI'] < 25: 
-            signal, color = "超賣反彈機會 ⤴️", "#ffa500" # 橘色
+            signal, color = "超賣反彈機會 ⤴️", "#F57C00" # 橘色
         elif last['RSI'] > 75: 
-            signal, color = "超買過熱警示 ⚠️", "#ff4b4b"
+            signal, color = "超買過熱警示 ⚠️", "#2E7D32" # 綠色警示
         
         return df, {"signal": signal, "color": color, "rsi": last['RSI'], "close": last['Close']}
     except Exception as e:
@@ -135,35 +124,47 @@ def analyze_signal(symbol):
 def convert_df(df):
     return df.to_csv(index=False).encode('utf-8')
 
-# --- 5. 核心：庫存計算 (用來找出目前持有什麼) ---
-def get_current_holdings_list(df):
-    """只回傳目前庫存 > 0 的股票代號列表"""
-    portfolio = {} 
+# --- 5. 核心：庫存計算 ---
+def get_current_holdings_map(df):
+    portfolio_qty = {}
+    portfolio_name = {}
+    
     df = df.sort_values(by='Date')
     
     for _, row in df.iterrows():
-        sym = row['Symbol']
+        sym = str(row['Symbol']).strip()
+        if sym.isdigit() and len(sym) < 4: sym = sym.zfill(4)
+        
+        name = row['Name']
         qty = float(row['Quantity'])
         t_type = row['Type']
         
-        if sym not in portfolio: portfolio[sym] = 0
+        if sym not in portfolio_qty: 
+            portfolio_qty[sym] = 0
+            portfolio_name[sym] = name 
         
-        if "Buy" in t_type or "Dividend" in t_type: # 配股也算增加
-            portfolio[sym] += qty
+        if name and name != "查無名稱":
+            portfolio_name[sym] = name
+
+        if "Buy" in t_type or "Dividend" in t_type:
+            portfolio_qty[sym] += qty
         elif "Sell" in t_type:
-            portfolio[sym] -= qty
+            portfolio_qty[sym] -= qty
             
-    # 過濾出庫存大於 0 的代號
-    active_symbols = [k for k, v in portfolio.items() if v > 0.1] # 0.1是避免浮點數誤差
-    return active_symbols
+    active_holdings = {}
+    for sym, qty in portfolio_qty.items():
+        if qty > 0.1:
+            active_holdings[sym] = portfolio_name.get(sym, sym)
+    return active_holdings
 
 def calculate_portfolio_full(df):
-    """完整的資產損益計算 (給 Tab 4 用)"""
     portfolio = {}
     df = df.sort_values(by='Date')
     
     for _, row in df.iterrows():
-        sym = row['Symbol']
+        sym = str(row['Symbol']).strip()
+        if sym.isdigit() and len(sym) < 4: sym = sym.zfill(4)
+        
         name = row['Name']
         qty = float(row['Quantity'])
         price = float(row['Price'])
@@ -199,13 +200,15 @@ def calculate_portfolio_full(df):
     current_prices = {}
     if tickers_list:
         try:
-            tickers_str = " ".join(tickers_list)
+            query_list = [f"{s}.TW" if s.isdigit() else s for s in tickers_list]
+            tickers_str = " ".join(query_list)
             data = yf.Tickers(tickers_str)
-            for t in tickers_list:
+            for i, sym in enumerate(tickers_list):
                 try:
-                    hist = data.tickers[t].history(period="1d")
-                    current_prices[t] = hist['Close'].iloc[-1] if not hist.empty else 0
-                except: current_prices[t] = 0
+                    q_sym = query_list[i]
+                    hist = data.tickers[q_sym].history(period="1d")
+                    current_prices[sym] = hist['Close'].iloc[-1] if not hist.empty else 0
+                except: current_prices[sym] = 0
         except: pass
 
     total_mkt, total_unreal, total_real = 0, 0, 0
@@ -264,7 +267,7 @@ with tab1:
 # === Tab 2: 批次匯入 ===
 with tab2:
     st.header("📥 批次匯入")
-    template_data = {"Date": ["2024-01-01"], "Type": ["Buy"], "Symbol": ["2330"], "Price": [600], "Quantity": [1000], "Fees": [20], "Tax": [0]}
+    template_data = {"Date": ["2024-01-01"], "Type": ["Buy"], "Symbol": ["0050"], "Price": [150], "Quantity": [1000], "Fees": [20], "Tax": [0]}
     st.download_button("下載範本", convert_df(pd.DataFrame(template_data)), "template.csv", "text/csv")
     
     uploaded_file = st.file_uploader("上傳 CSV", type=["csv"])
@@ -292,79 +295,74 @@ with tab2:
             if batch_save_data(rows): st.success(f"匯入 {len(rows)} 筆！")
         except Exception as e: st.error(f"錯誤: {e}")
 
-# === Tab 3: 持股訊號 (修正重點：自動抓庫存) ===
+# === Tab 3: 持股訊號 ===
 with tab3:
     st.header("🔍 持股技術診斷")
     
-    # 先載入資料以獲取庫存列表
     df_sig = load_data()
     
     if not df_sig.empty:
-        active_holdings = get_current_holdings_list(df_sig)
+        holdings_map = get_current_holdings_map(df_sig)
         
-        if active_holdings:
-            st.success(f"偵測到您的庫存共有 {len(active_holdings)} 檔股票，正在進行 AI 診斷...")
+        if holdings_map:
+            # 顯示格式： 0050 元大台灣50
+            options = [f"{sym} {name}" for sym, name in holdings_map.items()]
+            selected_option = st.selectbox("選擇庫存股票", options)
+            selected_symbol = selected_option.split()[0]
             
-            # 讓使用者選擇要查看的股票 (預設顯示第一檔)
-            selected_stock = st.selectbox("選擇庫存股票查看詳情", active_holdings)
-            
-            # 另外提供手動查詢欄位
             st.markdown("---")
-            manual_search = st.text_input("或查詢其他股票代號", placeholder="輸入代號 (例如 0050)")
-            
-            target_stock = manual_search if manual_search else selected_stock
+            manual_search = st.text_input("或查詢其他代號", placeholder="輸入代號")
+            target_stock = manual_search if manual_search else selected_symbol
             
             if target_stock:
-                with st.spinner(f"正在分析 {target_stock} ..."):
+                display_name = holdings_map.get(target_stock, target_stock)
+                with st.spinner(f"分析中: {target_stock} ..."):
                     hist, ana = analyze_signal(target_stock)
                 
                 if hist is not None:
-                    # 指標卡片
+                    # 指標卡片 (背景淺灰，字體黑)
                     c1, c2, c3 = st.columns(3)
                     c1.metric("即時股價", f"{ana['close']:.2f}")
                     c2.metric("RSI (14)", f"{ana['rsi']:.1f}")
-                    # 使用 HTML 渲染帶顏色的訊號文字
+                    
+                    # 訊號燈 (白底，字體帶顏色)
                     c3.markdown(f"""
-                        <div style="background-color:#262730; padding:10px; border-radius:5px; border:1px solid #4f4f4f; text-align:center;">
-                            <p style="color:#d1d1d1; font-size:14px; margin:0;">AI 建議</p>
+                        <div style="background-color:white; padding:10px; border:1px solid #ddd; border-radius:5px; text-align:center;">
+                            <p style="color:#666; font-size:14px; margin:0;">AI 建議</p>
                             <p style="color:{ana['color']}; font-size:24px; font-weight:bold; margin:0;">{ana['signal']}</p>
                         </div>
                     """, unsafe_allow_html=True)
                     
-                    # 繪圖
+                    # 亮色版 K 線圖
                     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
-                    # K線
-                    fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], name='K線'), row=1, col=1)
-                    # 均線
-                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='orange', width=1), name='20MA'), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA60'], line=dict(color='#00bfff', width=1), name='60MA'), row=1, col=1)
-                    # 量
-                    fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], marker_color='#555555', name='成交量'), row=2, col=1)
+                    # 紅漲綠跌 K 線
+                    fig.add_trace(go.Candlestick(
+                        x=hist.index, 
+                        open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'],
+                        increasing_line_color='#D32F2F', decreasing_line_color='#2E7D32', # 台股紅漲綠跌
+                        name='K線'
+                    ), row=1, col=1)
                     
-                    # 圖表深色主題設定
+                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='#FF9800', width=1), name='20MA'), row=1, col=1)
+                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA60'], line=dict(color='#2196F3', width=1), name='60MA'), row=1, col=1)
+                    fig.add_trace(go.Bar(x=hist.index, y=hist['Volume'], marker_color='#9E9E9E', name='成交量'), row=2, col=1)
+                    
+                    # 亮色圖表主題
                     fig.update_layout(
+                        title=f"{target_stock} K線圖",
                         height=550, 
-                        template="plotly_dark", # Plotly 內建深色主題
-                        paper_bgcolor='rgba(0,0,0,0)', # 透明背景融入網頁
-                        plot_bgcolor='rgba(0,0,0,0)',
+                        template="plotly_white", # 改為亮色主題
                         xaxis_rangeslider_visible=False, 
                         showlegend=False,
-                        margin=dict(l=10, r=10, t=10, b=10)
+                        margin=dict(l=10, r=10, t=40, b=10)
                     )
                     st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("目前庫存為空，請先輸入買入紀錄。")
-            # 庫存為空時，仍允許手動查詢
-            manual = st.text_input("查詢股票代號", value="2330")
-            if manual:
-                hist, ana = analyze_signal(manual)
-                if hist is not None:
-                    st.metric("股價", f"{ana['close']:.2f}")
-                    st.plotly_chart(go.Figure(data=[go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'])]).update_layout(template="plotly_dark", xaxis_rangeslider_visible=False))
+            st.info("無庫存")
     else:
-        st.warning("無交易紀錄資料。")
+        st.warning("無資料")
 
-# === Tab 4: 資產庫存 (使用高對比表格) ===
+# === Tab 4: 資產庫存 (顏色修正) ===
 with tab4:
     st.header("💰 資產庫存")
     with st.spinner("計算中..."):
@@ -374,18 +372,19 @@ with tab4:
             
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("總市值", f"${t_mkt:,.0f}")
-            k2.metric("未實現損益", f"${t_unreal:,.0f}", delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%")
+            # 台股習慣：紅賺(+) 綠賠(-)
+            k2.metric("未實現損益", f"${t_unreal:,.0f}", delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", delta_color="normal")
             k3.metric("已實現+股息", f"${t_real:,.0f}")
             k4.metric("總損益", f"${(t_unreal+t_real):,.0f}")
             
             st.markdown("---")
             if not p_df.empty:
-                # 格式化表格
+                # 表格字體顏色修正 (紅賺綠賠)
                 st.dataframe(
                     p_df.style.format({
                         "庫存股數": "{:,.0f}", "平均成本": "{:.2f}", "現價": "{:.2f}",
                         "市值": "{:,.0f}", "未實現損益": "{:,.0f}", "已實現+股息": "{:,.0f}"
-                    }).map(lambda x: 'color: #ff4b4b' if x > 0 else 'color: #00ff00', subset=['未實現損益']), 
+                    }).map(lambda x: 'color: #D32F2F; font-weight: bold' if x > 0 else 'color: #2E7D32; font-weight: bold', subset=['未實現損益']), 
                     use_container_width=True
                 )
             else:
