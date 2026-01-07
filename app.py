@@ -40,7 +40,8 @@ def init_connection():
 
 def is_tw_stock(symbol):
     symbol = str(symbol).upper().strip()
-    if ".TW" in symbol or symbol.isdigit(): return True
+    # 只要是純數字，或者是含有 .TW 的，都算台股
+    if symbol.isdigit() or ".TW" in symbol: return True
     return False
 
 def load_data():
@@ -73,6 +74,7 @@ def save_data(row_data):
         target_sheet = SHEET_TW if is_tw_stock(symbol) else SHEET_US
         sheet = spreadsheet.worksheet(target_sheet)
         sheet.append_row(row_data)
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"寫入失敗: {e}")
@@ -96,10 +98,13 @@ def batch_save_data_smart(rows, market_type):
             for _, r in existing_df.iterrows():
                 p = safe_float(r.get('價格', 0))
                 q = safe_float(r.get('股數', 0))
-                sig = (str(r['日期']), str(r['代號']), str(r['類別']), p, q)
+                # 代號也要統一轉字串比較
+                s = str(r.get('代號', '')).strip()
+                sig = (str(r['日期']), s, str(r['類別']), p, q)
                 existing_signatures.add(sig)
         
         for row in rows:
+            # row: [日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅, 總金額]
             new_sig = (str(row[0]), str(row[2]), str(row[1]), float(row[4]), float(row[5]))
             if new_sig in existing_signatures: duplicate_count += 1
             else:
@@ -108,6 +113,7 @@ def batch_save_data_smart(rows, market_type):
         
         if rows_to_append:
             sheet.append_rows(rows_to_append)
+            st.cache_data.clear()
             return True, len(rows_to_append), duplicate_count
         else: return True, 0, duplicate_count
 
@@ -115,48 +121,33 @@ def batch_save_data_smart(rows, market_type):
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 (強化版) ---
-# 移除 cache，確保每次匯入都嘗試重新抓取，避免記住「查無資料」
-def get_stock_info_live(symbol):
+# --- 3. 股票資訊 (核心修改：不依賴快取，強制標準化代號) ---
+def get_stock_info(symbol):
     try:
+        # 1. 初始清理：轉字串、去空白、轉大寫
         symbol = str(symbol).strip().upper()
-        # 移除可能多餘的 .TW 以便重新判斷
-        clean_symbol = symbol.replace('.TW', '')
         
-        # 補零邏輯
-        if clean_symbol.isdigit() and len(clean_symbol) < 4: 
-            clean_symbol = clean_symbol.zfill(4)
-            
-        # 決定查詢代號
-        if clean_symbol.isdigit():
+        # 2. 核心邏輯：如果是純數字 (代表是台股)，強制補零至 4 位數
+        # 這就是您要求的「當成數字處理」的部分：50 -> 0050
+        if symbol.isdigit():
+            clean_symbol = symbol.zfill(4) 
             query_symbol = f"{clean_symbol}.TW"
         else:
-            query_symbol = clean_symbol
-        
-        stock = yf.Ticker(query_symbol)
-        
-        # 嘗試獲取資訊，設定 timeout 避免卡死
-        try:
-            info = stock.info
-            # 優先順序：全名 -> 簡稱 -> 代號本身
-            name = info.get('longName') or info.get('shortName') or clean_symbol
-            pe = info.get('trailingPE', 0)
-            yield_rate = info.get('dividendYield', 0)
-            if yield_rate: yield_rate *= 100
-        except:
-            # 如果 Yahoo 連線失敗，回傳代號當作名稱，避免空白
-            name = clean_symbol 
-            pe = 0
-            yield_rate = 0
+            clean_symbol = symbol
+            query_symbol = clean_symbol # 美股不變
             
+        # 3. 嘗試去網路抓名稱 (作為備用)
+        stock = yf.Ticker(query_symbol)
+        info = stock.info
+        name = info.get('longName') or info.get('shortName') or clean_symbol
+        
+        pe = info.get('trailingPE', 0)
+        yield_rate = info.get('dividendYield', 0)
+        if yield_rate: yield_rate *= 100
+        
         return query_symbol, name, pe, yield_rate
     except: 
-        return symbol, symbol, 0, 0
-
-# 保留快取版給一般頁面使用，減少流量
-@st.cache_data(ttl=3600)
-def get_stock_info_cached(symbol):
-    return get_stock_info_live(symbol)
+        return symbol, "查無名稱", 0, 0
 
 # --- 4. 技術分析 ---
 def calculate_technicals(df):
@@ -192,10 +183,14 @@ def calculate_technicals(df):
 
 def analyze_full_signal(symbol):
     try:
-        # 使用 Cache 版獲取基本面
-        q_sym, _, pe, yield_rate = get_stock_info_cached(symbol)
+        # 使用標準化邏輯取得查詢代號
+        clean_sym = str(symbol).strip().upper()
+        if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
         
-        stock = yf.Ticker(q_sym)
+        if clean_sym.isdigit(): query_symbol = f"{clean_sym}.TW"
+        else: query_symbol = clean_sym
+            
+        stock = yf.Ticker(query_symbol)
         df = stock.history(period="1y")
         if len(df) < 60: return None, {}, 0, 0
         
@@ -215,6 +210,12 @@ def analyze_full_signal(symbol):
         elif score >= 1: signal, color = "偏多操作 📈", "#E65100"
         elif score <= -2: signal, color = "建議賣出 📉", "#2E7D32"
         else: signal, color = "區間震盪 ☁️", "#666666"
+        
+        # 簡易獲取基本面 (不需全名)
+        info = stock.info
+        pe = info.get('trailingPE', 0)
+        yield_rate = info.get('dividendYield', 0)
+        if yield_rate: yield_rate *= 100
         
         analysis = {
             "signal": signal, "color": color, "reasons": reasons,
@@ -239,8 +240,9 @@ def calculate_full_portfolio(df):
     df = df.sort_values(by='日期')
     
     for _, row in df.iterrows():
+        # 代號標準化：讀出來不管是 50 還是 '0050'，一律補零變成 '0050'
         sym = str(row['代號']).strip().upper()
-        if sym.isdigit() and len(sym) < 4: sym = sym.zfill(4)
+        if sym.isdigit(): sym = sym.zfill(4)
         
         name = row['名稱']
         qty = safe_float(row['股數'])
@@ -340,9 +342,12 @@ with tab1:
         name = "..."
         rsym = isym
         if isym: 
-            if isym.isdigit() and len(isym)<4: isym=isym.zfill(4)
-            # 單筆輸入時也使用 Live 版，確保名稱正確
-            rsym, name, _, _ = get_stock_info_live(isym)
+            # 單筆輸入時，立即做標準化處理
+            check_sym = str(isym).strip().upper()
+            if check_sym.isdigit(): check_sym = check_sym.zfill(4)
+            
+            # 使用校正後的代號去查名稱
+            rsym, name, _, _ = get_stock_info(check_sym)
         
         st.info(f"股票: **{name}**")
         
@@ -356,19 +361,28 @@ with tab1:
         
         if st.button("送出", type="primary"):
             type_val = "買入" if "買" in itype else "賣出" if "賣" in itype else "股息"
-            clean_sym = rsym.replace('.TW','')
+            # 儲存前，再次確保代號是乾淨的 (去掉 .TW, 有 4 位數)
+            clean_sym = rsym.replace('.TW', '') 
+            if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
+            
             if save_data([str(idate), type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
                 st.success(f"已儲存至 {'台股' if is_tw_stock(rsym) else '美股'} 分頁")
 
-# Tab 2: 匯入 (強化抓名邏輯)
+# Tab 2: 匯入 (代號標準化邏輯版)
 with tab2:
     st.markdown("### 📥 批次匯入 (支援 Excel/CSV)")
+    st.info("""
+    **代號邏輯說明**：
+    * 系統會自動將數字代號補零 (例如輸入 50 會自動變成 0050)。
+    * 系統會**優先使用您 Excel 內填寫的「名稱」**。
+    * 若您沒填名稱，系統會嘗試用標準化後的代號去網路上查。
+    """)
     
-    # 範本邏輯保持不變
     template_data = {
         "日期": ["2024-01-01", "2024-02-01", "2024-07-15", "2024-08-20", "2024-09-01"], 
         "類別": ["買入", "賣出", "股息", "股息", "股息"], 
-        "代號": ["0050", "0050", "2330", "2884", "2317"], 
+        "代號": ["0050", "0050", "2330", "2884", "2317"],
+        "名稱": ["元大台灣50", "元大台灣50", "台積電", "玉山金", "鴻海"], # 範本預填名稱
         "價格": [150, 160, 5000, 0, 2000],   
         "股數": [1000, 500, 0, 50, 20],      
         "手續費": [20, 20, 10, 0, 0], 
@@ -391,11 +405,9 @@ with tab2:
     uploaded_file = st.file_uploader("上傳檔案", type=["csv", "xlsx"])
     
     if uploaded_file and st.button("開始匯入"):
-        # 強制清除快取，避免記憶到錯誤的「查無名稱」
-        st.cache_data.clear()
-        
         try:
             if uploaded_file.name.endswith('.csv'):
+                # 即使讀 csv 也要強制代號轉 string
                 df_u = pd.read_csv(uploaded_file, dtype={'代號': str})
             else:
                 df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
@@ -410,11 +422,23 @@ with tab2:
             total = len(df_u)
             
             for i, (index, r) in enumerate(df_u.iterrows()):
-                rs = str(r['代號']).strip().upper()
-                if rs.isdigit() and len(rs)<4: rs = rs.zfill(4)
+                # 1. 代號標準化核心：轉字串 -> 去空白 -> 轉大寫
+                raw_sym = str(r['代號']).strip().upper()
                 
-                # 使用不帶 cache 的版本抓取，確保正確性
-                q_sym, name, _, _ = get_stock_info_live(rs)
+                # 2. 如果是數字 (例如 50 或 "50")，強制補成 4 位 (0050)
+                if raw_sym.isdigit():
+                    clean_sym = raw_sym.zfill(4)
+                else:
+                    clean_sym = raw_sym # 美股或其他代號保持原樣
+                
+                # 3. 名稱處理：優先讀 Excel
+                excel_name = str(r.get('名稱', '')).strip()
+                if excel_name and excel_name.lower() != 'nan':
+                    name = excel_name
+                else:
+                    # Excel 沒填才去查，查的時候要用 .TW
+                    query_sym = f"{clean_sym}.TW" if clean_sym.isdigit() else clean_sym
+                    _, name, _, _ = get_stock_info(query_sym)
                 
                 tt_raw = str(r['類別'])
                 tt = "買入" if any(x in tt_raw for x in ["Buy","買"]) else "賣出" if any(x in tt_raw for x in ["Sell","賣"]) else "股息"
@@ -425,7 +449,8 @@ with tab2:
                 t = safe_float(r['交易稅'])
                 
                 amt = -(q*p+f) if "買" in tt else (q*p-f-t) if "賣" in tt else p
-                clean_sym = q_sym.replace('.TW', '')
+                
+                # 寫入資料庫時，代號存標準化後的 (0050)，不要存 .TW，也不要存 50
                 row_data = [str(r['日期']), tt, clean_sym, name, p, q, f, t, amt]
                 
                 if is_tw_stock(clean_sym): tw_rows.append(row_data)
@@ -436,8 +461,6 @@ with tab2:
                     if val > 1.0: val = 1.0
                     bar.progress(val)
                 
-                # 增加一點延遲，避免 Yahoo API 鎖 IP
-                time.sleep(0.1)
                 status.text(f"處理中: {clean_sym} - {name}")
             
             msg = ""
@@ -455,7 +478,7 @@ with tab2:
             
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
-# Tab 3 & 4 (維持)
+# Tab 3 & 4 (保持不變)
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
     market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
@@ -466,7 +489,8 @@ with tab3:
         inventory = {}
         names = {}
         for _, row in df_raw.iterrows():
-            sym = str(row['代號'])
+            sym = str(row['代號']).strip().upper()
+            if sym.isdigit(): sym = sym.zfill(4)
             tt = str(row['類別'])
             q = safe_float(row['股數'])
             if "買" in tt or "Buy" in tt or "股" in tt: inventory[sym] = inventory.get(sym, 0) + q
