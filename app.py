@@ -38,7 +38,7 @@ st.markdown("""
 SHEET_TW = "TW_Trades"
 SHEET_US = "US_Trades"
 
-# 內建熱門股字典
+# 內建熱門股字典 (Fallback 用)
 KNOWN_STOCKS = {
     '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息', 
     '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '006208': '富邦台50',
@@ -57,7 +57,6 @@ def init_connection():
 
 def is_tw_stock(symbol):
     symbol = str(symbol).upper().strip()
-    # 判斷邏輯：純數字 或 有.TW 結尾
     if symbol.isdigit() or ".TW" in symbol: return True
     return False
 
@@ -103,11 +102,16 @@ def safe_float(val):
     except: return 0.0
 
 def standardize_symbol(symbol):
+    """
+    代號標準化：
+    1. 去除單引號、空白
+    2. 純數字部分補零 (2碼補00, 3碼補00, 4碼不變)
+    """
     s = str(symbol).replace("'", "").strip().upper()
     if s.isdigit():
-        if len(s) == 3: return "00" + s 
-        if len(s) == 2: return "00" + s 
-        if len(s) < 4: return s.zfill(4)
+        if len(s) == 3: return "00" + s  # 878 -> 00878
+        if len(s) == 2: return "00" + s  # 50 -> 0050
+        if len(s) < 4: return s.zfill(4) # 其他補零
     return s
 
 def standardize_date(date_val):
@@ -131,19 +135,18 @@ def standardize_date(date_val):
         return dt.strftime("%Y-%m-%d")
     except: return None
 
-# 【新功能】獲取即時匯率
 @st.cache_data(ttl=3600)
 def get_exchange_rate():
     try:
-        # 抓取 USD to TWD
         ticker = yf.Ticker("TWD=X")
         hist = ticker.history(period="1d")
         if not hist.empty:
             return hist['Close'].iloc[-1]
-        return 32.5 # 預設值 (防呆)
+        return 32.5 
     except:
         return 32.5
 
+# 直通寫入模式 (不去重)
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -261,6 +264,7 @@ def analyze_full_signal(symbol):
         macd_hist = last['MACD_Hist']
         vol, vol_ma5 = last['Volume'], last['VolMA5']
         
+        # 策略邏輯
         if close > ma5 and k > d and vol > vol_ma5:
             st_sig = {"txt": "🔴 短線買進", "col": "#D32F2F", "desc": "站上5日線+帶量+KD金叉"}
         elif rsi < 25:
@@ -302,7 +306,7 @@ def analyze_full_signal(symbol):
         return df, analysis, benchmark
     except: return None, None, None
 
-# --- 5. 資產計算 (更新：雙幣別計算) ---
+# --- 5. 資產計算 (更新：分別計算 USD 和 TWD 總額) ---
 def get_sort_rank(t_type):
     t_type = str(t_type)
     if "Buy" in t_type or "買" in t_type or "配股" in t_type: return 1
@@ -331,7 +335,6 @@ def calculate_full_portfolio(df, rate):
         date_str = row['日期'].strftime("%Y-%m")
         
         if sym not in portfolio:
-            # 加入 IsUS 標記
             portfolio[sym] = {'Name': name, 'Qty': 0, 'Cost': 0, 'Realized': 0, 'Div': 0, 'IsUS': not is_tw_stock(sym)}
         if date_str not in monthly_pnl: monthly_pnl[date_str] = 0
             
@@ -352,7 +355,6 @@ def calculate_full_portfolio(df, rate):
                 profit = revenue - cost_sold
                 p['Realized'] += profit
                 
-                # 月損益統一轉台幣計算，以便畫圖
                 profit_twd = profit * rate if p['IsUS'] else profit
                 monthly_pnl[date_str] += profit_twd
                 
@@ -361,10 +363,8 @@ def calculate_full_portfolio(df, rate):
             else:
                 revenue = (qty * price) - fees - tax
                 p['Realized'] += revenue
-                
                 rev_twd = revenue * rate if p['IsUS'] else revenue
                 monthly_pnl[date_str] += rev_twd
-                
                 p['Qty'] -= qty
         elif is_div:
             p['Div'] += price
@@ -379,16 +379,14 @@ def calculate_full_portfolio(df, rate):
             q_list = []
             for s in active_syms:
                 if is_tw_stock(s):
-                    # 修正：若台股標準化後是 2330，要加 .TW
                     if s.isdigit(): q_list.append(f"{s}.TW")
                     else: q_list.append(s)
                 else:
-                    q_list.append(s) # 美股直接用代號
+                    q_list.append(s)
             
             data = yf.Tickers(" ".join(q_list))
             for i, s in enumerate(active_syms):
                 try:
-                    # 對應回查詢代號
                     qs = q_list[i] 
                     h = data.tickers[qs].history(period="1d")
                     curr_prices[s] = h['Close'].iloc[-1] if not h.empty else 0
@@ -396,9 +394,16 @@ def calculate_full_portfolio(df, rate):
         except: pass
         
     res = []
+    
+    # 初始化 TWD 總額 (給全覽用)
     tot_mkt_twd = 0
     tot_unreal_twd = 0
     tot_real_twd = 0
+    
+    # 初始化 USD 總額 (給美股模式用)
+    tot_mkt_usd = 0
+    tot_unreal_usd = 0
+    tot_real_usd = 0
     
     for sym, v in portfolio.items():
         cp = curr_prices.get(sym, 0)
@@ -408,11 +413,16 @@ def calculate_full_portfolio(df, rate):
         unreal = mkt - v['Cost'] if v['Qty'] > 0 else 0
         realized = v['Realized'] + v['Div']
         
-        # 彙總計算 (全部換算回台幣)
+        # 累積 TWD 總額 (所有股票都換算)
         if v['IsUS']:
             tot_mkt_twd += mkt * rate
             tot_unreal_twd += unreal * rate
             tot_real_twd += realized * rate
+            
+            # 累積 USD 總額 (只累加美股)
+            tot_mkt_usd += mkt
+            tot_unreal_usd += unreal
+            tot_real_usd += realized
         else:
             tot_mkt_twd += mkt
             tot_unreal_twd += unreal
@@ -427,11 +437,18 @@ def calculate_full_portfolio(df, rate):
                 "市值": mkt, 
                 "未實現": unreal, 
                 "已實現+息": realized,
-                "IsUS": v['IsUS'] # 標記給前端顯示用
+                "IsUS": v['IsUS']
             })
             
     m_df = pd.DataFrame(list(monthly_pnl.items()), columns=['Month', 'PnL']).sort_values('Month')
-    return pd.DataFrame(res), tot_mkt_twd, tot_unreal_twd, tot_real_twd, m_df
+    
+    # 回傳所有總額數據
+    totals = {
+        "twd": {"mkt": tot_mkt_twd, "unreal": tot_unreal_twd, "real": tot_real_twd},
+        "usd": {"mkt": tot_mkt_usd, "unreal": tot_unreal_usd, "real": tot_real_usd}
+    }
+    
+    return pd.DataFrame(res), totals, m_df
 
 def convert_to_excel(df):
     output = io.BytesIO()
@@ -626,14 +643,42 @@ with tab4:
         elif "美股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'US']
         
         if not df_raw.empty:
-            p_df, t_mkt, t_unreal, t_real, m_df = calculate_full_portfolio(df_raw, rate)
+            p_df, totals, m_df = calculate_full_portfolio(df_raw, rate)
             if show_only_held: p_df = p_df[p_df['庫存'] > 0]
             
+            # --- KPI 顯示邏輯 (雙幣別核心) ---
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("總市值 (TWD)", f"${t_mkt:,.0f}")
-            k2.metric("未實現損益 (TWD)", f"${t_unreal:,.0f}", delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", delta_color="normal")
-            k3.metric("已實現+股息 (TWD)", f"${t_real:,.0f}")
-            k4.metric("總損益 (TWD)", f"${(t_unreal+t_real):,.0f}")
+            
+            # Helper to display Dual Currency
+            def show_kpi(label, usd_val, twd_val, is_us_mode):
+                if is_us_mode:
+                    # 美股模式：顯示 US$ ... / NT$ ...
+                    val_str = f"US$ {usd_val:,.0f} \n (NT$ {twd_val:,.0f})"
+                    st.metric(label, val_str)
+                else:
+                    # 台股或全部：只顯示 NT$
+                    st.metric(label, f"NT$ {twd_val:,.0f}")
+
+            # 判斷是否為「美股僅見」模式
+            is_us_view = "美股" in view_filter
+            
+            # 使用 metric 顯示 (注意：Streamlit metric 不支援換行符號 \n 顯示在 value，所以這裡做字串拼接)
+            # 為了美觀，針對美股模式，我們直接把字串組好塞進去
+            
+            val_mkt = f"US$ {totals['usd']['mkt']:,.0f} / NT$ {totals['twd']['mkt']:,.0f}" if is_us_view else f"NT$ {totals['twd']['mkt']:,.0f}"
+            val_unreal = f"US$ {totals['usd']['unreal']:,.0f} / NT$ {totals['twd']['unreal']:,.0f}" if is_us_view else f"NT$ {totals['twd']['unreal']:,.0f}"
+            val_real = f"US$ {totals['usd']['real']:,.0f} / NT$ {totals['twd']['real']:,.0f}" if is_us_view else f"NT$ {totals['twd']['real']:,.0f}"
+            
+            # 總損益
+            tot_usd = totals['usd']['unreal'] + totals['usd']['real']
+            tot_twd = totals['twd']['unreal'] + totals['twd']['real']
+            val_tot = f"US$ {tot_usd:,.0f} / NT$ {tot_twd:,.0f}" if is_us_view else f"NT$ {tot_twd:,.0f}"
+
+            k1.metric("總市值", val_mkt)
+            k2.metric("未實現損益", val_unreal)
+            k3.metric("已實現+股息", val_real)
+            k4.metric("總損益", val_tot)
+
             st.markdown("---")
             
             g1, g2 = st.columns([1, 1])
@@ -645,13 +690,13 @@ with tab4:
             with g2:
                 if not m_df.empty:
                     m_df['Color'] = m_df['PnL'].apply(lambda x: '#D32F2F' if x >= 0 else '#2E7D32')
-                    fig_bar = px.bar(m_df, x='Month', y='PnL', text_auto='.0s', title="每月已實現損益")
+                    fig_bar = px.bar(m_df, x='Month', y='PnL', text_auto='.0s', title="每月已實現損益 (TWD)")
                     fig_bar.update_traces(marker_color=m_df['Color'])
                     st.plotly_chart(fig_bar, use_container_width=True)
             
             st.subheader("📋 資產明細表")
             if not p_df.empty:
-                # 雙幣別格式化
+                # 列表顯示邏輯：美股顯示雙幣，台股顯示單幣
                 def format_row(row, col):
                     val = row[col]
                     if row['IsUS']:
@@ -659,16 +704,12 @@ with tab4:
                         return f"${val:,.2f} / NT${val_twd:,.0f}"
                     return f"{val:,.2f}"
 
-                # 複製一個顯示用的 df
                 display_df = p_df.copy()
                 for col in ['均價', '現價', '市值', '未實現', '已實現+息']:
                     display_df[col] = display_df.apply(lambda r: format_row(r, col), axis=1)
                 
-                # 庫存不需換算
                 display_df['庫存'] = display_df['庫存'].apply(lambda x: f"{x:,.0f}")
-                
-                # 隱藏輔助欄位
-                display_df = display_df.drop(columns=['IsUS'])
+                display_df = display_df.drop(columns=['IsUS']) # 隱藏標記欄位
                 
                 st.dataframe(display_df, use_container_width=True)
             else: st.info("無資料")
