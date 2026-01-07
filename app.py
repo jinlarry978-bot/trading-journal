@@ -9,7 +9,7 @@ import yfinance as yf
 import time
 import datetime
 import io
-import re # 用於正則表達式處理日期
+import re
 
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
@@ -90,47 +90,30 @@ def save_data(row_data):
         st.error(f"寫入失敗: {e}")
         return False
 
-# --- 核心更新：萬能日期標準化函數 ---
+# --- 日期標準化函數 ---
 def standardize_date(date_val):
-    """
-    將各種奇怪的日期格式 (Excel數字、斜線、點號、民國年)
-    統一轉為 YYYY-MM-DD 字串
-    """
     try:
         if pd.isna(date_val) or str(date_val).strip() == "":
             return None
-            
-        # 1. 處理 Excel 序列號 (例如 45300.0)
         if isinstance(date_val, (int, float)):
-            # Excel 的基準日通常是 1899-12-30
             dt = datetime.datetime(1899, 12, 30) + datetime.timedelta(days=date_val)
             return dt.strftime("%Y-%m-%d")
-            
         date_str = str(date_val).strip()
-        
-        # 2. 處理已經是 Timestamp 物件的情況
         if isinstance(date_val, (pd.Timestamp, datetime.date, datetime.datetime)):
             return date_val.strftime("%Y-%m-%d")
-
-        # 3. 處理 "2024.01.01" 或 "2024/1/1"
         date_str = date_str.replace('.', '-').replace('/', '-')
-        
-        # 4. 處理民國年 (例如 113-01-01)
         if '-' in date_str:
             parts = date_str.split('-')
             if len(parts) == 3:
                 y, m, d = parts
-                if len(y) <= 3 and int(y) < 1900: # 判定為民國年
+                if len(y) <= 3 and int(y) < 1900: 
                     y = str(int(y) + 1911)
                     date_str = f"{y}-{m}-{d}"
-        
-        # 嘗試轉換
         dt = pd.to_datetime(date_str)
         return dt.strftime("%Y-%m-%d")
-        
-    except:
-        return None # 真的無法辨識才回傳 None
+    except: return None
 
+# --- 核心修改：移除重複檢查邏輯 ---
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -138,37 +121,14 @@ def batch_save_data_smart(rows, market_type):
         target_sheet_name = SHEET_TW if market_type == 'TW' else SHEET_US
         sheet = spreadsheet.worksheet(target_sheet_name)
         
-        existing_records = sheet.get_all_records()
-        existing_df = pd.DataFrame(existing_records)
-        
-        rows_to_append = []
-        duplicate_count = 0
-        
-        existing_signatures = set()
-        if not existing_df.empty:
-            for _, r in existing_df.iterrows():
-                p = safe_float(r.get('價格', 0))
-                q = safe_float(r.get('股數', 0))
-                s = str(r.get('代號', '')).strip()
-                # 這裡也要標準化日期以確保比對正確
-                d = standardize_date(r.get('日期', ''))
-                sig = (d, s, str(r['類別']), p, q)
-                existing_signatures.add(sig)
-        
-        for row in rows:
-            # row: [日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅, 總金額]
-            # row[0] 已經在匯入迴圈中被 standardize_date 處理過了
-            new_sig = (str(row[0]), str(row[2]), str(row[1]), float(row[4]), float(row[5]))
-            if new_sig in existing_signatures: duplicate_count += 1
-            else:
-                rows_to_append.append(row)
-                existing_signatures.add(new_sig)
-        
-        if rows_to_append:
-            sheet.append_rows(rows_to_append)
+        # 移除讀取現有資料比對的邏輯
+        # 直接寫入所有傳入的資料 (rows)
+        if rows:
+            sheet.append_rows(rows)
             st.cache_data.clear()
-            return True, len(rows_to_append), duplicate_count
-        else: return True, 0, duplicate_count
+            return True, len(rows), 0 # 0 代表沒有被過濾的
+        else:
+            return True, 0, 0
 
     except Exception as e:
         st.error(f"批次寫入錯誤: {e}")
@@ -288,14 +248,8 @@ def calculate_full_portfolio(df):
     portfolio = {}
     monthly_pnl = {}
     
-    # 核心修正：使用 apply + standardize_date 來清洗所有日期
-    # 不再直接 to_datetime，而是先標準化格式，確保不漏資料
     df['日期'] = df['日期'].apply(standardize_date)
-    
-    # 標準化後再轉 datetime，這時候應該格式都很完美了
     df['日期'] = pd.to_datetime(df['日期'], errors='coerce') 
-    
-    # 如果真的還有無法辨識的 (比如日期填了 "abc")，才刪除
     df = df.dropna(subset=['日期'])
     
     df = df.sort_values(by='日期')
@@ -508,11 +462,12 @@ with tab2:
             
             msg = ""
             if tw_rows:
+                # 這裡調用的已是修正後的 batch_save_data_smart (無去重功能)
                 _, added_tw, dup_tw = batch_save_data_smart(tw_rows, 'TW')
-                msg += f"🇹🇼 台股: 新增 {added_tw} 筆 (過濾重複 {dup_tw} 筆)。 "
+                msg += f"🇹🇼 台股: 新增 {added_tw} 筆。 "
             if us_rows:
                 _, added_us, dup_us = batch_save_data_smart(us_rows, 'US')
-                msg += f"🇺🇸 美股: 新增 {added_us} 筆 (過濾重複 {dup_us} 筆)。"
+                msg += f"🇺🇸 美股: 新增 {added_us} 筆。"
             
             if not tw_rows and not us_rows:
                 st.warning("無有效資料匯入。")
