@@ -40,8 +40,7 @@ def init_connection():
 
 def is_tw_stock(symbol):
     symbol = str(symbol).upper().strip()
-    # 只要是純數字，或者是含有 .TW 的，都算台股
-    if symbol.isdigit() or ".TW" in symbol: return True
+    if ".TW" in symbol or symbol.isdigit(): return True
     return False
 
 def load_data():
@@ -98,13 +97,12 @@ def batch_save_data_smart(rows, market_type):
             for _, r in existing_df.iterrows():
                 p = safe_float(r.get('價格', 0))
                 q = safe_float(r.get('股數', 0))
-                # 代號也要統一轉字串比較
+                # 代號統一轉字串
                 s = str(r.get('代號', '')).strip()
                 sig = (str(r['日期']), s, str(r['類別']), p, q)
                 existing_signatures.add(sig)
         
         for row in rows:
-            # row: [日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅, 總金額]
             new_sig = (str(row[0]), str(row[2]), str(row[1]), float(row[4]), float(row[5]))
             if new_sig in existing_signatures: duplicate_count += 1
             else:
@@ -121,35 +119,34 @@ def batch_save_data_smart(rows, market_type):
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 (核心修改：不依賴快取，強制標準化代號) ---
+# --- 3. 股票資訊 ---
 def get_stock_info(symbol):
     try:
-        # 1. 初始清理：轉字串、去空白、轉大寫
         symbol = str(symbol).strip().upper()
-        
-        # 2. 核心邏輯：如果是純數字 (代表是台股)，強制補零至 4 位數
-        # 這就是您要求的「當成數字處理」的部分：50 -> 0050
         if symbol.isdigit():
             clean_symbol = symbol.zfill(4) 
             query_symbol = f"{clean_symbol}.TW"
         else:
             clean_symbol = symbol
-            query_symbol = clean_symbol # 美股不變
+            query_symbol = clean_symbol
             
-        # 3. 嘗試去網路抓名稱 (作為備用)
         stock = yf.Ticker(query_symbol)
-        info = stock.info
-        name = info.get('longName') or info.get('shortName') or clean_symbol
-        
-        pe = info.get('trailingPE', 0)
-        yield_rate = info.get('dividendYield', 0)
-        if yield_rate: yield_rate *= 100
+        try:
+            info = stock.info
+            name = info.get('longName') or info.get('shortName') or clean_symbol
+            pe = info.get('trailingPE', 0)
+            yield_rate = info.get('dividendYield', 0)
+            if yield_rate: yield_rate *= 100
+        except:
+            name = clean_symbol
+            pe = 0
+            yield_rate = 0
         
         return query_symbol, name, pe, yield_rate
     except: 
         return symbol, "查無名稱", 0, 0
 
-# --- 4. 技術分析 ---
+# --- 4. 技術分析 (修復回傳值錯誤) ---
 def calculate_technicals(df):
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
@@ -183,7 +180,6 @@ def calculate_technicals(df):
 
 def analyze_full_signal(symbol):
     try:
-        # 使用標準化邏輯取得查詢代號
         clean_sym = str(symbol).strip().upper()
         if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
         
@@ -192,7 +188,9 @@ def analyze_full_signal(symbol):
             
         stock = yf.Ticker(query_symbol)
         df = stock.history(period="1y")
-        if len(df) < 60: return None, {}, 0, 0
+        
+        # 修正 1: 資料不足時，只回傳兩個 None
+        if len(df) < 60: return None, None
         
         df = calculate_technicals(df)
         last = df.iloc[-1]
@@ -211,11 +209,15 @@ def analyze_full_signal(symbol):
         elif score <= -2: signal, color = "建議賣出 📉", "#2E7D32"
         else: signal, color = "區間震盪 ☁️", "#666666"
         
-        # 簡易獲取基本面 (不需全名)
-        info = stock.info
-        pe = info.get('trailingPE', 0)
-        yield_rate = info.get('dividendYield', 0)
-        if yield_rate: yield_rate *= 100
+        # 抓取基本面
+        try:
+            info = stock.info
+            pe = info.get('trailingPE', 0)
+            yield_rate = info.get('dividendYield', 0)
+            if yield_rate: yield_rate *= 100
+        except:
+            pe = 0
+            yield_rate = 0
         
         analysis = {
             "signal": signal, "color": color, "reasons": reasons,
@@ -223,7 +225,9 @@ def analyze_full_signal(symbol):
             "pe": pe, "yield": yield_rate
         }
         return df, analysis
-    except: return None, {}, 0, 0
+    
+    # 修正 2: 發生例外時，也只回傳兩個 None
+    except: return None, None
 
 # --- 5. 資產計算 ---
 def safe_float(val):
@@ -240,7 +244,6 @@ def calculate_full_portfolio(df):
     df = df.sort_values(by='日期')
     
     for _, row in df.iterrows():
-        # 代號標準化：讀出來不管是 50 還是 '0050'，一律補零變成 '0050'
         sym = str(row['代號']).strip().upper()
         if sym.isdigit(): sym = sym.zfill(4)
         
@@ -342,11 +345,8 @@ with tab1:
         name = "..."
         rsym = isym
         if isym: 
-            # 單筆輸入時，立即做標準化處理
             check_sym = str(isym).strip().upper()
             if check_sym.isdigit(): check_sym = check_sym.zfill(4)
-            
-            # 使用校正後的代號去查名稱
             rsym, name, _, _ = get_stock_info(check_sym)
         
         st.info(f"股票: **{name}**")
@@ -361,42 +361,29 @@ with tab1:
         
         if st.button("送出", type="primary"):
             type_val = "買入" if "買" in itype else "賣出" if "賣" in itype else "股息"
-            # 儲存前，再次確保代號是乾淨的 (去掉 .TW, 有 4 位數)
             clean_sym = rsym.replace('.TW', '') 
             if clean_sym.isdigit(): clean_sym = clean_sym.zfill(4)
             
             if save_data([str(idate), type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
                 st.success(f"已儲存至 {'台股' if is_tw_stock(rsym) else '美股'} 分頁")
 
-# Tab 2: 匯入 (代號標準化邏輯版)
+# Tab 2: 匯入
 with tab2:
-    st.markdown("### 📥 批次匯入 (支援 Excel/CSV)")
-    st.info("""
-    **代號邏輯說明**：
-    * 系統會自動將數字代號補零 (例如輸入 50 會自動變成 0050)。
-    * 系統會**優先使用您 Excel 內填寫的「名稱」**。
-    * 若您沒填名稱，系統會嘗試用標準化後的代號去網路上查。
-    """)
+    st.markdown("### 📥 批次匯入 (優先使用檔案名稱)")
     
     template_data = {
         "日期": ["2024-01-01", "2024-02-01", "2024-07-15", "2024-08-20", "2024-09-01"], 
         "類別": ["買入", "賣出", "股息", "股息", "股息"], 
         "代號": ["0050", "0050", "2330", "2884", "2317"],
-        "名稱": ["元大台灣50", "元大台灣50", "台積電", "玉山金", "鴻海"], # 範本預填名稱
+        "名稱": ["元大台灣50", "元大台灣50", "台積電", "玉山金", "鴻海"], 
         "價格": [150, 160, 5000, 0, 2000],   
         "股數": [1000, 500, 0, 50, 20],      
         "手續費": [20, 20, 10, 0, 0], 
         "交易稅": [0, 100, 0, 0, 0]
     }
     
-    with st.expander("查看範本資料說明"):
-        st.table(pd.DataFrame({
-            "情境": ["一般買入", "一般賣出", "純領現金股息", "純領股票股利(配股)", "同時領現金+配股"],
-            "說明": ["單價150買1000股", "單價160賣500股", "台積電配息$5000 (股數0)", "玉山金配股50股 (現金0)", "鴻海配息$2000 + 配股20股"]
-        }))
-
     st.download_button(
-        label="📥 下載 Excel 完整範本 (.xlsx)",
+        label="📥 下載完整範本 (.xlsx)",
         data=convert_to_excel(pd.DataFrame(template_data)),
         file_name="trade_template_full.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -407,7 +394,6 @@ with tab2:
     if uploaded_file and st.button("開始匯入"):
         try:
             if uploaded_file.name.endswith('.csv'):
-                # 即使讀 csv 也要強制代號轉 string
                 df_u = pd.read_csv(uploaded_file, dtype={'代號': str})
             else:
                 df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
@@ -422,21 +408,16 @@ with tab2:
             total = len(df_u)
             
             for i, (index, r) in enumerate(df_u.iterrows()):
-                # 1. 代號標準化核心：轉字串 -> 去空白 -> 轉大寫
                 raw_sym = str(r['代號']).strip().upper()
-                
-                # 2. 如果是數字 (例如 50 或 "50")，強制補成 4 位 (0050)
                 if raw_sym.isdigit():
                     clean_sym = raw_sym.zfill(4)
                 else:
-                    clean_sym = raw_sym # 美股或其他代號保持原樣
+                    clean_sym = raw_sym
                 
-                # 3. 名稱處理：優先讀 Excel
                 excel_name = str(r.get('名稱', '')).strip()
                 if excel_name and excel_name.lower() != 'nan':
                     name = excel_name
                 else:
-                    # Excel 沒填才去查，查的時候要用 .TW
                     query_sym = f"{clean_sym}.TW" if clean_sym.isdigit() else clean_sym
                     _, name, _, _ = get_stock_info(query_sym)
                 
@@ -450,7 +431,6 @@ with tab2:
                 
                 amt = -(q*p+f) if "買" in tt else (q*p-f-t) if "賣" in tt else p
                 
-                # 寫入資料庫時，代號存標準化後的 (0050)，不要存 .TW，也不要存 50
                 row_data = [str(r['日期']), tt, clean_sym, name, p, q, f, t, amt]
                 
                 if is_tw_stock(clean_sym): tw_rows.append(row_data)
@@ -522,6 +502,8 @@ with tab3:
                 fig.add_trace(go.Bar(x=hist.index, y=hist['MACD_Hist'], marker_color=colors, name='MACD'), row=3, col=1)
                 fig.update_layout(height=700, template="plotly_white", xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("查無資料，請檢查代號是否正確。")
 
 with tab4:
     st.markdown("### 💰 資產透視")
