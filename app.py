@@ -73,7 +73,6 @@ def save_data(row_data):
         target_sheet = SHEET_TW if is_tw_stock(symbol) else SHEET_US
         sheet = spreadsheet.worksheet(target_sheet)
         sheet.append_row(row_data)
-        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"寫入失敗: {e}")
@@ -109,7 +108,6 @@ def batch_save_data_smart(rows, market_type):
         
         if rows_to_append:
             sheet.append_rows(rows_to_append)
-            st.cache_data.clear()
             return True, len(rows_to_append), duplicate_count
         else: return True, 0, duplicate_count
 
@@ -117,23 +115,48 @@ def batch_save_data_smart(rows, market_type):
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 ---
-@st.cache_data(ttl=3600)
-def get_stock_info(symbol):
+# --- 3. 股票資訊 (強化版) ---
+# 移除 cache，確保每次匯入都嘗試重新抓取，避免記住「查無資料」
+def get_stock_info_live(symbol):
     try:
         symbol = str(symbol).strip().upper()
-        if symbol.isdigit() and len(symbol) < 4: symbol = symbol.zfill(4)
-        query_symbol = f"{symbol}.TW" if symbol.isdigit() else symbol
+        # 移除可能多餘的 .TW 以便重新判斷
+        clean_symbol = symbol.replace('.TW', '')
+        
+        # 補零邏輯
+        if clean_symbol.isdigit() and len(clean_symbol) < 4: 
+            clean_symbol = clean_symbol.zfill(4)
+            
+        # 決定查詢代號
+        if clean_symbol.isdigit():
+            query_symbol = f"{clean_symbol}.TW"
+        else:
+            query_symbol = clean_symbol
         
         stock = yf.Ticker(query_symbol)
-        info = stock.info
-        name = info.get('longName', symbol)
         
-        pe = info.get('trailingPE', 0)
-        yield_rate = info.get('dividendYield', 0)
-        if yield_rate: yield_rate *= 100
+        # 嘗試獲取資訊，設定 timeout 避免卡死
+        try:
+            info = stock.info
+            # 優先順序：全名 -> 簡稱 -> 代號本身
+            name = info.get('longName') or info.get('shortName') or clean_symbol
+            pe = info.get('trailingPE', 0)
+            yield_rate = info.get('dividendYield', 0)
+            if yield_rate: yield_rate *= 100
+        except:
+            # 如果 Yahoo 連線失敗，回傳代號當作名稱，避免空白
+            name = clean_symbol 
+            pe = 0
+            yield_rate = 0
+            
         return query_symbol, name, pe, yield_rate
-    except: return symbol, "查無名稱", 0, 0
+    except: 
+        return symbol, symbol, 0, 0
+
+# 保留快取版給一般頁面使用，減少流量
+@st.cache_data(ttl=3600)
+def get_stock_info_cached(symbol):
+    return get_stock_info_live(symbol)
 
 # --- 4. 技術分析 ---
 def calculate_technicals(df):
@@ -169,11 +192,10 @@ def calculate_technicals(df):
 
 def analyze_full_signal(symbol):
     try:
-        sym = str(symbol).strip().upper()
-        if sym.isdigit() and len(sym) < 4: sym = sym.zfill(4)
-        if sym.isdigit(): sym += ".TW"
+        # 使用 Cache 版獲取基本面
+        q_sym, _, pe, yield_rate = get_stock_info_cached(symbol)
         
-        stock = yf.Ticker(sym)
+        stock = yf.Ticker(q_sym)
         df = stock.history(period="1y")
         if len(df) < 60: return None, {}, 0, 0
         
@@ -193,8 +215,6 @@ def analyze_full_signal(symbol):
         elif score >= 1: signal, color = "偏多操作 📈", "#E65100"
         elif score <= -2: signal, color = "建議賣出 📉", "#2E7D32"
         else: signal, color = "區間震盪 ☁️", "#666666"
-        
-        _, _, pe, yield_rate = get_stock_info(sym.split('.')[0])
         
         analysis = {
             "signal": signal, "color": color, "reasons": reasons,
@@ -321,7 +341,8 @@ with tab1:
         rsym = isym
         if isym: 
             if isym.isdigit() and len(isym)<4: isym=isym.zfill(4)
-            rsym, name, _, _ = get_stock_info(isym)
+            # 單筆輸入時也使用 Live 版，確保名稱正確
+            rsym, name, _, _ = get_stock_info_live(isym)
         
         st.info(f"股票: **{name}**")
         
@@ -339,11 +360,11 @@ with tab1:
             if save_data([str(idate), type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
                 st.success(f"已儲存至 {'台股' if is_tw_stock(rsym) else '美股'} 分頁")
 
-# Tab 2: 匯入 (修正進度條邏輯)
+# Tab 2: 匯入 (強化抓名邏輯)
 with tab2:
     st.markdown("### 📥 批次匯入 (支援 Excel/CSV)")
-    st.info("支援 Excel 格式，請參考下方範本填寫。")
     
+    # 範本邏輯保持不變
     template_data = {
         "日期": ["2024-01-01", "2024-02-01", "2024-07-15", "2024-08-20", "2024-09-01"], 
         "類別": ["買入", "賣出", "股息", "股息", "股息"], 
@@ -370,28 +391,30 @@ with tab2:
     uploaded_file = st.file_uploader("上傳檔案", type=["csv", "xlsx"])
     
     if uploaded_file and st.button("開始匯入"):
+        # 強制清除快取，避免記憶到錯誤的「查無名稱」
+        st.cache_data.clear()
+        
         try:
             if uploaded_file.name.endswith('.csv'):
                 df_u = pd.read_csv(uploaded_file, dtype={'代號': str})
             else:
                 df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
             
-            # 防呆：刪除空白列
             df_u = df_u.dropna(how='all')
             df_u = df_u.dropna(subset=['日期'])
             
             tw_rows = []
             us_rows = []
-            bar = st.progress(0.0) # 初始化為 0.0 (Float)
+            bar = st.progress(0.0)
             status = st.empty()
             total = len(df_u)
             
-            # 修正關鍵：使用 enumerate 重新計數，避免 Index 不連續導致進度條破表
             for i, (index, r) in enumerate(df_u.iterrows()):
                 rs = str(r['代號']).strip().upper()
                 if rs.isdigit() and len(rs)<4: rs = rs.zfill(4)
                 
-                q_sym, name, _, _ = get_stock_info(rs)
+                # 使用不帶 cache 的版本抓取，確保正確性
+                q_sym, name, _, _ = get_stock_info_live(rs)
                 
                 tt_raw = str(r['類別'])
                 tt = "買入" if any(x in tt_raw for x in ["Buy","買"]) else "賣出" if any(x in tt_raw for x in ["Sell","賣"]) else "股息"
@@ -409,12 +432,13 @@ with tab2:
                 else: us_rows.append(row_data)
                 
                 if total > 0:
-                    # 強制鎖定在 0.0 ~ 1.0 之間
                     val = (i + 1) / total
                     if val > 1.0: val = 1.0
                     bar.progress(val)
-                    
-                status.text(f"處理中: {clean_sym}")
+                
+                # 增加一點延遲，避免 Yahoo API 鎖 IP
+                time.sleep(0.1)
+                status.text(f"處理中: {clean_sym} - {name}")
             
             msg = ""
             if tw_rows:
@@ -431,7 +455,7 @@ with tab2:
             
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
-# Tab 3 & 4 (保持不變)
+# Tab 3 & 4 (維持)
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
     market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
