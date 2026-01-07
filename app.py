@@ -11,79 +11,118 @@ import datetime
 import io
 import re
 
-# --- 1. 頁面設定 ---
+# --- 1. 頁面設定 (寬版 + 標題) ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
 
-# CSS 優化：定義 KPI 卡片樣式
+# --- 2. 核心 CSS 美化工程 ---
 st.markdown("""
     <style>
-    .stApp {background-color: #F5F7F9;}
-    
-    /* 原生 Metric 樣式微調 */
-    div[data-testid="stMetric"] {
-        background-color: #FFFFFF;
-        border: 1px solid #E0E0E0;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    /* 引入 Google Fonts (Inter 字體，適合金融數字顯示) */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
     }
-    
-    /* 客製化 KPI 卡片 (給美股雙幣用) */
+
+    /* 整體背景微調 */
+    .stApp {
+        background-color: #F8F9FA;
+    }
+
+    /* KPI 卡片設計 (帶懸浮特效) */
     .kpi-card {
-        background-color: #FFFFFF;
-        border: 1px solid #E0E0E0;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        background: linear-gradient(135deg, #FFFFFF 0%, #FFFFFF 100%);
+        border: 1px solid #E9ECEF;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.02);
         height: 100%;
         display: flex;
         flex-direction: column;
         justify-content: center;
+        transition: all 0.3s ease;
+    }
+    .kpi-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 15px rgba(0,0,0,0.05);
+        border-color: #CED4DA;
     }
     .kpi-label {
         font-size: 14px;
-        color: #666;
-        margin-bottom: 4px;
+        color: #6C757D;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 8px;
     }
     .kpi-value-main {
-        font-size: 26px;
-        font-weight: 700;
-        color: #31333F;
-        line-height: 1.2;
+        font-size: 28px;
+        font-weight: 800;
+        color: #212529;
+        line-height: 1.1;
+        letter-spacing: -0.5px;
     }
     .kpi-value-sub {
         font-size: 15px;
-        color: #888;
+        color: #ADB5BD;
         font-weight: 500;
-        margin-top: 2px;
-        margin-bottom: 8px;
+        margin-top: 4px;
     }
     .kpi-delta {
         font-size: 14px;
-        font-weight: 600;
-        display: flex;
-        align-items: center;
+        font-weight: 700;
+        margin-top: 8px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        width: fit-content;
     }
-    .delta-pos { color: #D32F2F; } /* 紅漲 */
-    .delta-neg { color: #2E7D32; } /* 綠跌 (若習慣美股綠漲紅跌，可自行互換顏色碼) */
-    .delta-neutral { color: #666; }
+    
+    /* 漲跌顏色定義 (台股紅漲綠跌) */
+    .delta-pos { color: #D93535; background-color: rgba(217, 53, 53, 0.1); }
+    .delta-neg { color: #35A853; background-color: rgba(53, 168, 83, 0.1); }
+    .delta-neutral { color: #6C757D; background-color: rgba(108, 117, 125, 0.1); }
 
-    /* 策略卡片樣式 */
+    /* 策略訊號卡片 */
     .strategy-card {
-        padding: 15px; 
-        border-radius: 10px; 
-        margin-bottom: 10px; 
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        padding: 20px; 
+        border-radius: 12px; 
+        margin-bottom: 15px; 
+        box-shadow: 0 4px 6px rgba(0,0,0,0.02);
         background-color: white;
+        border: 1px solid #E9ECEF;
+        transition: transform 0.2s;
+    }
+    .strategy-card:hover {
+        transform: scale(1.02);
+    }
+    .strategy-title { margin: 0; color: #495057; font-weight: 700; font-size: 16px; }
+    .strategy-signal { margin: 10px 0; font-weight: 800; font-size: 22px; }
+    .strategy-desc { font-size: 13px; color: #868E96; margin: 0; }
+
+    /* 原生 Metric 優化 */
+    div[data-testid="stMetric"] {
+        background-color: #FFFFFF;
+        border: 1px solid #E9ECEF;
+        padding: 20px;
+        border-radius: 12px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+    }
+    div[data-testid="stMetricLabel"] p { font-weight: 600; color: #6C757D; }
+    div[data-testid="stMetricValue"] { font-weight: 800 !important; color: #212529; }
+
+    /* 表格優化 */
+    div[data-testid="stDataFrame"] {
+        border: 1px solid #E9ECEF;
+        border-radius: 8px;
+        overflow: hidden;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 連線設定 ---
+# --- 3. 連線設定 ---
 SHEET_TW = "TW_Trades"
 SHEET_US = "US_Trades"
 
-# 內建熱門股字典
 KNOWN_STOCKS = {
     '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息', 
     '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '006208': '富邦台50',
@@ -183,10 +222,9 @@ def get_exchange_rate():
         if not hist.empty:
             return hist['Close'].iloc[-1]
         return 32.5 
-    except:
-        return 32.5
+    except: return 32.5
 
-# 直通寫入模式
+# 直通寫入
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -210,7 +248,6 @@ def get_stock_info_extended(symbol):
         else: query_symbol = clean_symbol
             
         stock = yf.Ticker(query_symbol)
-        
         name = clean_symbol
         if clean_symbol in KNOWN_STOCKS: name = KNOWN_STOCKS[clean_symbol]
         
@@ -221,8 +258,7 @@ def get_stock_info_extended(symbol):
             if api_name: name = api_name
         except: pass
         
-        def get_val(key, default=None):
-            return info.get(key, default)
+        def get_val(key, default=None): return info.get(key, default)
 
         fundamentals = {
             'pe': get_val('trailingPE'),
@@ -237,8 +273,7 @@ def get_stock_info_extended(symbol):
         if fundamentals['roe']: fundamentals['roe'] *= 100
             
         return query_symbol, name, fundamentals
-    except: 
-        return symbol, symbol, {}
+    except: return symbol, symbol, {}
 
 # --- 4. 技術分析 ---
 def calculate_technicals(df):
@@ -295,8 +330,7 @@ def analyze_full_signal(symbol):
             stock_ret = (df['Close'].iloc[-1] / df['Close'].iloc[0] - 1) * 100
             bench_ret = (benchmark.iloc[-1] / benchmark.iloc[0] - 1) * 100
             perf_diff = stock_ret - bench_ret
-        except:
-            stock_ret, bench_ret, perf_diff = 0, 0, 0
+        except: stock_ret, bench_ret, perf_diff = 0, 0, 0
 
         close = last['Close']
         ma5, ma20, ma60 = last['MA5'], last['MA20'], last['MA60']
@@ -304,6 +338,10 @@ def analyze_full_signal(symbol):
         macd_hist = last['MACD_Hist']
         vol, vol_ma5 = last['Volume'], last['VolMA5']
         
+        # 策略邏輯
+        st_sig, mt_sig, lt_sig = {}, {}, {}
+        
+        # 短期
         if close > ma5 and k > d and vol > vol_ma5:
             st_sig = {"txt": "🔴 短線買進", "col": "#D32F2F", "desc": "站上5日線+帶量+KD金叉"}
         elif rsi < 25:
@@ -315,6 +353,7 @@ def analyze_full_signal(symbol):
         else:
             st_sig = {"txt": "🟠 持有/觀望", "col": "#FF9800", "desc": "短期震盪整理"}
 
+        # 中期
         if close > ma20 and macd_hist > 0:
             mt_sig = {"txt": "🔴 波段買進", "col": "#D32F2F", "desc": "站穩月線+MACD多頭"}
         elif close < ma20 and macd_hist < 0:
@@ -322,8 +361,9 @@ def analyze_full_signal(symbol):
         elif close > ma20:
             mt_sig = {"txt": "🟠 續抱", "col": "#FF9800", "desc": "股價於月線之上"}
         else:
-            mt_sig = {"txt": "⚪ 弱勢整理", "col": "#666666", "desc": "股價受制於月線"}
+            mt_sig = {"txt": "⚪ 弱勢整理", "col": "#6C757D", "desc": "股價受制於月線"}
 
+        # 長期
         is_bull_align = ma5 > ma20 and ma20 > ma60
         if close > ma60 and is_bull_align:
             lt_sig = {"txt": "🔴 長線加碼", "col": "#D32F2F", "desc": "均線多頭排列"}
@@ -332,7 +372,7 @@ def analyze_full_signal(symbol):
         elif close < ma60:
             lt_sig = {"txt": "🟢 趨勢轉空", "col": "#2E7D32", "desc": "跌破季線(生命線)"}
         else:
-            lt_sig = {"txt": "⚪ 盤整", "col": "#666666", "desc": "季線附近震盪"}
+            lt_sig = {"txt": "⚪ 盤整", "col": "#6C757D", "desc": "季線附近震盪"}
 
         analysis = {
             "st": st_sig, "mt": mt_sig, "lt": lt_sig,
@@ -393,10 +433,8 @@ def calculate_full_portfolio(df, rate):
                 revenue = (qty * price) - fees - tax
                 profit = revenue - cost_sold
                 p['Realized'] += profit
-                
                 profit_twd = profit * rate if p['IsUS'] else profit
                 monthly_pnl[date_str] += profit_twd
-                
                 p['Qty'] -= qty
                 p['Cost'] -= cost_sold
             else:
@@ -420,8 +458,7 @@ def calculate_full_portfolio(df, rate):
                 if is_tw_stock(s):
                     if s.isdigit(): q_list.append(f"{s}.TW")
                     else: q_list.append(s)
-                else:
-                    q_list.append(s)
+                else: q_list.append(s)
             
             data = yf.Tickers(" ".join(q_list))
             for i, s in enumerate(active_syms):
@@ -433,13 +470,8 @@ def calculate_full_portfolio(df, rate):
         except: pass
         
     res = []
-    tot_mkt_twd = 0
-    tot_unreal_twd = 0
-    tot_real_twd = 0
-    
-    tot_mkt_usd = 0
-    tot_unreal_usd = 0
-    tot_real_usd = 0
+    tot_mkt_twd = 0; tot_unreal_twd = 0; tot_real_twd = 0
+    tot_mkt_usd = 0; tot_unreal_usd = 0; tot_real_usd = 0
     
     for sym, v in portfolio.items():
         cp = curr_prices.get(sym, 0)
@@ -453,7 +485,6 @@ def calculate_full_portfolio(df, rate):
             tot_mkt_twd += mkt * rate
             tot_unreal_twd += unreal * rate
             tot_real_twd += realized * rate
-            
             tot_mkt_usd += mkt
             tot_unreal_usd += unreal
             tot_real_usd += realized
@@ -475,12 +506,10 @@ def calculate_full_portfolio(df, rate):
             })
             
     m_df = pd.DataFrame(list(monthly_pnl.items()), columns=['Month', 'PnL']).sort_values('Month')
-    
     totals = {
         "twd": {"mkt": tot_mkt_twd, "unreal": tot_unreal_twd, "real": tot_real_twd},
         "usd": {"mkt": tot_mkt_usd, "unreal": tot_unreal_usd, "real": tot_real_usd}
     }
-    
     return pd.DataFrame(res), totals, m_df
 
 def convert_to_excel(df):
@@ -501,27 +530,20 @@ with tab1:
         itype = st.selectbox("類別", ["買入 (Buy)", "賣出 (Sell)", "股息 (Dividend)"])
         idate = st.date_input("日期")
         isym = st.text_input("代號", placeholder="台股2330, 美股AAPL")
-        
-        name = "..."
-        rsym = isym
+        name = "..."; rsym = isym
         if isym: 
             check_sym = standardize_symbol(isym)
             rsym, name, _ = get_stock_info_extended(check_sym)
-        
         st.info(f"股票: **{name}**")
-        
         iqty = st.number_input("股數 (或配股數)", min_value=0.0, step=100.0)
         iprice = st.number_input("價格 (或現金股息總額)", min_value=0.0, step=0.1)
         ifees = st.number_input("手續費", min_value=0.0)
         itax = st.number_input("交易稅", min_value=0.0)
-        
         tot = -(iqty*iprice+ifees) if "買" in itype else (iqty*iprice-ifees-itax) if "賣" in itype else iprice
         st.metric("總金額", f"${tot:,.0f}")
-        
         if st.button("送出", type="primary"):
             type_val = "買入" if "買" in itype else "賣出" if "賣" in itype else "股息"
-            clean_sym = rsym.replace('.TW', '') 
-            clean_sym = standardize_symbol(clean_sym)
+            clean_sym = rsym.replace('.TW', ''); clean_sym = standardize_symbol(clean_sym)
             std_date = standardize_date(idate)
             if save_data([std_date, type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
                 st.success("已儲存")
@@ -530,128 +552,80 @@ with tab1:
 with tab2:
     st.markdown("### 📥 批次匯入")
     template_data = {
-        "日期": ["2024-01-01", "2024-02-01", "2024-07-15", "2024-08-20", "2024-09-01"], 
-        "類別": ["買入", "賣出", "股息", "股息", "股息"], 
-        "代號": ["0050", "0050", "2330", "2884", "2317"],
-        "名稱": ["元大台灣50", "元大台灣50", "台積電", "玉山金", "鴻海"], 
-        "價格": [150, 160, 5000, 0, 2000], "股數": [1000, 500, 0, 50, 20], 
-        "手續費": [20, 20, 10, 0, 0], "交易稅": [0, 100, 0, 0, 0]
+        "日期": ["2024-01-01", "2024-02-01"], "類別": ["買入", "賣出"], "代號": ["0050", "2330"],
+        "名稱": ["元大台灣50", "台積電"], "價格": [150, 160], "股數": [1000, 500], "手續費": [20, 20], "交易稅": [0, 100]
     }
-    st.download_button("📥 下載範本", convert_to_excel(pd.DataFrame(template_data)), "template.xlsx")
-    
+    st.download_button("📥 下載 Excel 完整範本", convert_to_excel(pd.DataFrame(template_data)), "template.xlsx")
     uploaded_file = st.file_uploader("上傳檔案", type=["csv", "xlsx"])
     if uploaded_file and st.button("開始匯入"):
         try:
-            if uploaded_file.name.endswith('.csv'):
-                df_u = pd.read_csv(uploaded_file, dtype={'代號': str})
-            else:
-                df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
-            
-            df_u = df_u.dropna(how='all')
-            df_u['日期'] = df_u['日期'].apply(standardize_date)
-            df_u = df_u.dropna(subset=['日期'])
-            
-            tw_rows, us_rows = [], []
-            bar = st.progress(0.0)
-            total = len(df_u)
-            
+            if uploaded_file.name.endswith('.csv'): df_u = pd.read_csv(uploaded_file, dtype={'代號': str})
+            else: df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
+            df_u = df_u.dropna(how='all'); df_u['日期'] = df_u['日期'].apply(standardize_date); df_u = df_u.dropna(subset=['日期'])
+            tw_rows, us_rows = [], []; bar = st.progress(0.0); total = len(df_u)
             for i, (index, r) in enumerate(df_u.iterrows()):
                 clean_sym = standardize_symbol(r['代號'])
                 excel_name = str(r.get('名稱', '')).strip()
-                if excel_name and excel_name.lower() != 'nan': name = excel_name
-                else:
-                    _, name, _ = get_stock_info_extended(clean_sym)
-                
+                name = excel_name if excel_name and excel_name.lower() != 'nan' else get_stock_info_extended(clean_sym)[1]
                 tt = "買入" if any(x in str(r['類別']) for x in ["Buy","買"]) else "賣出" if any(x in str(r['類別']) for x in ["Sell","賣"]) else "股息"
                 q, p, f, t = safe_float(r['股數']), safe_float(r['價格']), safe_float(r['手續費']), safe_float(r['交易稅'])
                 amt = -(q*p+f) if "買" in tt else (q*p-f-t) if "賣" in tt else p
-                
                 row = [str(r['日期']), tt, clean_sym, name, p, q, f, t, amt]
                 if is_tw_stock(clean_sym): tw_rows.append(row)
                 else: us_rows.append(row)
-                
                 if total > 0: bar.progress(min((i+1)/total, 1.0))
-            
-            msg = ""
-            if tw_rows:
-                _, added_tw, _ = batch_save_data_smart(tw_rows, 'TW')
-                msg += f"🇹🇼 台股: {added_tw} 筆。 "
-            if us_rows:
-                _, added_us, _ = batch_save_data_smart(us_rows, 'US')
-                msg += f"🇺🇸 美股: {added_us} 筆。"
-            st.success(f"匯入完成！ {msg}")
+            if tw_rows: batch_save_data_smart(tw_rows, 'TW')
+            if us_rows: batch_save_data_smart(us_rows, 'US')
+            st.success("匯入完成！")
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
 # Tab 3: 策略
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
-    market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
+    market_filter = st.radio("選擇市場", ["全部", "台股", "美股"], horizontal=True)
     df_raw = load_data()
     if not df_raw.empty:
         if "台股" in market_filter: df_raw = df_raw[df_raw['Market'] == 'TW']
         elif "美股" in market_filter: df_raw = df_raw[df_raw['Market'] == 'US']
-        
-        inventory = {}
-        names = {}
+        inventory = {}; names = {}
         for _, row in df_raw.iterrows():
-            sym = standardize_symbol(row['代號'])
-            tt = str(row['類別'])
-            q = safe_float(row['股數'])
+            sym = standardize_symbol(row['代號']); tt = str(row['類別']); q = safe_float(row['股數'])
             if "買" in tt or "Buy" in tt or "配股" in tt: inventory[sym] = inventory.get(sym, 0) + q
             elif "賣" in tt or "Sell" in tt: inventory[sym] = inventory.get(sym, 0) - q
             names[sym] = row['名稱']
-        
         active_list = [f"{k} {names[k]}" for k, v in inventory.items() if v > 0.1]
         col_sel, col_search = st.columns([1, 1])
-        with col_sel:
-            sel = st.selectbox("庫存快選", active_list) if active_list else None
-        with col_search:
-            manual = st.text_input("或搜尋代號", placeholder="例如 2330")
-        
+        with col_sel: sel = st.selectbox("庫存快選", active_list) if active_list else None
+        with col_search: manual = st.text_input("或搜尋代號", placeholder="例如 2330")
         target = manual if manual else (sel.split()[0] if sel else None)
-        
         if target:
-            with st.spinner("AI 正在分析..."):
-                hist, ana, benchmark_hist = analyze_full_signal(target)
+            with st.spinner("分析中..."): hist, ana, _ = analyze_full_signal(target)
             if hist is not None:
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("股價", f"{ana['metrics']['close']:.2f}")
                 m2.metric("RSI", f"{ana['metrics']['rsi']:.1f}")
                 m3.metric("KD", f"{ana['metrics']['k']:.1f}")
+                m4.metric("vs 0050", f"{ana['metrics']['perf_stock']:.1f}%", f"{ana['metrics']['perf_diff']:+.1f}%")
                 
-                diff = ana['metrics']['perf_diff']
-                m4.metric("vs 0050", f"{ana['metrics']['perf_stock']:.1f}%", f"{diff:+.1f}%")
-
-                st.write("")
-                s1, s2, s3 = st.columns(3)
-                for col, key, title in zip([s1, s2, s3], ['st', 'mt', 'lt'], ['⚡ 短期 (5日)', '🌊 中期 (月線)', '🏔️ 長期 (季線)']):
-                    with col:
-                        st.markdown(f"""
+                st.write(""); s1, s2, s3 = st.columns(3)
+                for col, key, title in zip([s1, s2, s3], ['st', 'mt', 'lt'], ['⚡ 短期', '🌊 中期', '🏔️ 長期']):
+                    with col: st.markdown(f"""
                         <div class="strategy-card" style="border-left:5px solid {ana[key]['col']};">
-                            <h4 style="margin:0;">{title}</h4>
+                            <h4 class="strategy-title">{title}</h4>
                             <h3 style="margin:5px 0; color:{ana[key]['col']};">{ana[key]['txt']}</h3>
                             <p style="font-size:13px; color:#666; margin:0;">{ana[key]['desc']}</p>
                         </div>""", unsafe_allow_html=True)
-
-                st.subheader("🏥 體質健檢")
-                f = ana['fund']
-                f1, f2, f3, f4, f5 = st.columns(5)
-                f1.metric("P/E", f"{f.get('pe', 0):.1f}" if f.get('pe') else "N/A")
-                f2.metric("P/B", f"{f.get('pb', 0):.2f}" if f.get('pb') else "N/A")
-                f3.metric("Yield", f"{f.get('yield', 0):.2f}%" if f.get('yield') else "N/A")
-                f4.metric("ROE", f"{f.get('roe', 0):.1f}%" if f.get('roe') else "N/A")
-                f5.metric("Beta", f"{f.get('beta', 0):.2f}" if f.get('beta') else "N/A")
                 
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2])
                 fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], increasing_line_color='#D32F2F', decreasing_line_color='#2E7D32', name='K線'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Upper'], line=dict(color='rgba(0,100,255,0.3)', width=1), name='上軌'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Lower'], line=dict(color='rgba(0,100,255,0.3)', width=1), name='下軌', fill='tonexty'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='#FF9800'), name='月線'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='#FF9800', width=1.5), name='月線'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['MA60'], line=dict(color='#9C27B0', width=1.5), name='季線'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Upper'], line=dict(color='rgba(0,100,255,0.2)'), name='上軌'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Lower'], line=dict(color='rgba(0,100,255,0.2)'), name='下軌', fill='tonexty'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['K'], line=dict(color='#9C27B0'), name='K'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['D'], line=dict(color='#E91E63'), name='D'), row=2, col=1)
-                colors = ['#D32F2F' if v >= 0 else '#2E7D32' for v in hist['MACD_Hist']]
-                fig.add_trace(go.Bar(x=hist.index, y=hist['MACD_Hist'], marker_color=colors, name='MACD'), row=3, col=1)
-                fig.update_layout(height=800, template="plotly_white", xaxis_rangeslider_visible=False, showlegend=False)
+                fig.add_trace(go.Bar(x=hist.index, y=hist['MACD_Hist'], marker_color=['#D32F2F' if v>=0 else '#2E7D32' for v in hist['MACD_Hist']], name='MACD'), row=3, col=1)
+                fig.update_layout(height=700, template="plotly_white", margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
             else: st.warning("查無資料")
 
@@ -659,82 +633,54 @@ with tab3:
 with tab4:
     st.markdown("### 💰 資產透視")
     filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1])
-    with filter_col1:
-        view_filter = st.radio("顯示市場", ["全部", "台股僅見", "美股僅見"], horizontal=True)
-    with filter_col2:
-        st.write("")
-        st.write("") 
-        show_only_held = st.checkbox("只顯示目前持倉", value=False)
-    
+    with filter_col1: view_filter = st.radio("顯示市場", ["全部", "台股僅見", "美股僅見"], horizontal=True)
+    with filter_col2: st.write(""); st.write(""); show_only_held = st.checkbox("只顯示目前持倉", value=False)
     rate = get_exchange_rate()
-    with filter_col3:
-        st.metric("目前 USD/TWD 匯率", f"{rate:.2f}")
+    with filter_col3: st.metric("目前 USD/TWD 匯率", f"{rate:.2f}")
 
     df_raw = load_data()
     if not df_raw.empty:
         if "台股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'TW']
         elif "美股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'US']
-        
         if not df_raw.empty:
             p_df, totals, m_df = calculate_full_portfolio(df_raw, rate)
             if show_only_held: p_df = p_df[p_df['庫存'] > 0]
             
-            # Helper to create custom KPI card HTML
-            def kpi_card_html(label, val_main, val_sub=None, delta_str=None, delta_color_class="delta-neutral"):
+            # Helper: Render KPI Card
+            def kpi_card_html(label, val_main, val_sub=None, delta_str=None, delta_class="delta-neutral"):
                 sub_html = f'<div class="kpi-value-sub">{val_sub}</div>' if val_sub else ''
-                delta_html = f'<div class="kpi-delta {delta_color_class}">{delta_str}</div>' if delta_str else ''
-                return f"""
-                <div class="kpi-card">
-                    <div class="kpi-label">{label}</div>
-                    <div class="kpi-value-main">{val_main}</div>
-                    {sub_html}
-                    {delta_html}
-                </div>
-                """
+                delta_html = f'<div class="kpi-delta {delta_class}">{delta_str}</div>' if delta_str else ''
+                return f"""<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value-main">{val_main}</div>{sub_html}{delta_html}</div>"""
 
             k1, k2, k3, k4 = st.columns(4)
             is_us_view = "美股" in view_filter
+            t_usd = totals['usd']; t_twd = totals['twd']
             
-            # 準備數據
-            t_usd = totals['usd']
-            t_twd = totals['twd']
-            
-            # 1. 總市值
+            # Logic for Dual Currency Display
             if is_us_view:
-                with k1: st.markdown(kpi_card_html("總市值", f"US$ {t_usd['mkt']:,.0f}", f"(NT$ {t_twd['mkt']:,.0f})"), unsafe_allow_html=True)
+                with k1: st.markdown(kpi_card_html("總市值", f"US$ {t_usd['mkt']:,.0f}", f"≈ NT$ {t_twd['mkt']:,.0f}"), unsafe_allow_html=True)
+                
+                d_val = (t_usd['unreal']/t_usd['mkt']*100) if t_usd['mkt']>0 else 0
+                d_str = f"{'↑' if d_val>0 else '↓'} {d_val:.1f}%"
+                d_cls = "delta-pos" if d_val>0 else ("delta-neg" if d_val<0 else "delta-neutral")
+                with k2: st.markdown(kpi_card_html("未實現損益", f"US$ {t_usd['unreal']:,.0f}", f"≈ NT$ {t_twd['unreal']:,.0f}", d_str, d_cls), unsafe_allow_html=True)
+                
+                with k3: st.markdown(kpi_card_html("已實現+股息", f"US$ {t_usd['real']:,.0f}", f"≈ NT$ {t_twd['real']:,.0f}"), unsafe_allow_html=True)
+                
+                tot_usd = t_usd['unreal'] + t_usd['real']; tot_twd = t_twd['unreal'] + t_twd['real']
+                with k4: st.markdown(kpi_card_html("總損益", f"US$ {tot_usd:,.0f}", f"≈ NT$ {tot_twd:,.0f}"), unsafe_allow_html=True)
             else:
                 k1.metric("總市值", f"NT$ {t_twd['mkt']:,.0f}")
-
-            # 2. 未實現損益 (含 Delta)
-            if is_us_view:
-                delta_val = (t_usd['unreal'] / t_usd['mkt'] * 100) if t_usd['mkt'] > 0 else 0
-                delta_str = f"{'↑' if delta_val>0 else '↓'} {delta_val:.1f}%"
-                delta_cls = "delta-pos" if delta_val > 0 else ("delta-neg" if delta_val < 0 else "delta-neutral")
-                # 台股紅漲綠跌邏輯: pos (紅) if > 0
-                with k2: st.markdown(kpi_card_html("未實現損益", f"US$ {t_usd['unreal']:,.0f}", f"(NT$ {t_twd['unreal']:,.0f})", delta_str, delta_cls), unsafe_allow_html=True)
-            else:
                 k2.metric("未實現損益", f"NT$ {t_twd['unreal']:,.0f}", delta=f"{(t_twd['unreal']/t_twd['mkt']*100):.1f}%" if t_twd['mkt']>0 else "0%")
-
-            # 3. 已實現
-            if is_us_view:
-                with k3: st.markdown(kpi_card_html("已實現+股息", f"US$ {t_usd['real']:,.0f}", f"(NT$ {t_twd['real']:,.0f})"), unsafe_allow_html=True)
-            else:
                 k3.metric("已實現+股息", f"NT$ {t_twd['real']:,.0f}")
-
-            # 4. 總損益
-            tot_usd = t_usd['unreal'] + t_usd['real']
-            tot_twd = t_twd['unreal'] + t_twd['real']
-            if is_us_view:
-                with k4: st.markdown(kpi_card_html("總損益", f"US$ {tot_usd:,.0f}", f"(NT$ {tot_twd:,.0f})"), unsafe_allow_html=True)
-            else:
-                k4.metric("總損益", f"NT$ {tot_twd:,.0f}")
+                k4.metric("總損益", f"NT$ {(t_twd['unreal']+t_twd['real']):,.0f}")
 
             st.markdown("---")
-            
             g1, g2 = st.columns([1, 1])
             with g1:
                 if not p_df.empty and p_df[p_df['市值']>0].shape[0] > 0:
-                    fig_pie = px.pie(p_df[p_df['市值']>0], values='市值', names='名稱', hole=0.4, title="現有持倉分佈")
+                    fig_pie = px.pie(p_df[p_df['市值']>0], values='市值', names='名稱', hole=0.6, title="持倉分佈")
+                    fig_pie.update_traces(textposition='outside', textinfo='percent+label')
                     st.plotly_chart(fig_pie, use_container_width=True)
                 else: st.info("無持倉市值")
             with g2:
@@ -746,20 +692,11 @@ with tab4:
             
             st.subheader("📋 資產明細表")
             if not p_df.empty:
-                def format_row(row, col):
-                    val = row[col]
-                    if row['IsUS']:
-                        val_twd = val * rate
-                        return f"${val:,.2f} / NT${val_twd:,.0f}"
-                    return f"{val:,.2f}"
-
                 display_df = p_df.copy()
                 for col in ['均價', '現價', '市值', '未實現', '已實現+息']:
-                    display_df[col] = display_df.apply(lambda r: format_row(r, col), axis=1)
-                
+                    display_df[col] = display_df.apply(lambda r: f"${r[col]:,.2f} / NT${r[col]*rate:,.0f}" if r['IsUS'] else f"{r[col]:,.2f}", axis=1)
                 display_df['庫存'] = display_df['庫存'].apply(lambda x: f"{x:,.0f}")
-                display_df = display_df.drop(columns=['IsUS'])
-                st.dataframe(display_df, use_container_width=True)
+                st.dataframe(display_df.drop(columns=['IsUS']), use_container_width=True)
             else: st.info("無資料")
         else: st.info("該市場無資料")
     else: st.info("資料庫無資料")
