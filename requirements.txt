@@ -4,4 +4,3 @@ plotly
 gspread
 oauth2client
 yfinance
-ta-lib-binary
