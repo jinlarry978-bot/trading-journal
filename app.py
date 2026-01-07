@@ -14,7 +14,6 @@ import re
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
 
-# CSS 優化：讓指標卡片更立體，策略區塊更明顯
 st.markdown("""
     <style>
     .stApp {background-color: #F5F7F9;}
@@ -39,7 +38,7 @@ st.markdown("""
 SHEET_TW = "TW_Trades"
 SHEET_US = "US_Trades"
 
-# 內建熱門股字典 (Fallback 用)
+# 內建熱門股字典
 KNOWN_STOCKS = {
     '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息', 
     '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '006208': '富邦台50',
@@ -58,7 +57,8 @@ def init_connection():
 
 def is_tw_stock(symbol):
     symbol = str(symbol).upper().strip()
-    if ".TW" in symbol or symbol.isdigit(): return True
+    # 判斷邏輯：純數字 或 有.TW 結尾
+    if symbol.isdigit() or ".TW" in symbol: return True
     return False
 
 def load_data():
@@ -131,7 +131,19 @@ def standardize_date(date_val):
         return dt.strftime("%Y-%m-%d")
     except: return None
 
-# 直通寫入模式 (不去重)
+# 【新功能】獲取即時匯率
+@st.cache_data(ttl=3600)
+def get_exchange_rate():
+    try:
+        # 抓取 USD to TWD
+        ticker = yf.Ticker("TWD=X")
+        hist = ticker.history(period="1d")
+        if not hist.empty:
+            return hist['Close'].iloc[-1]
+        return 32.5 # 預設值 (防呆)
+    except:
+        return 32.5
+
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -147,11 +159,8 @@ def batch_save_data_smart(rows, market_type):
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 (擴充基本面數據) ---
+# --- 3. 股票資訊 ---
 def get_stock_info_extended(symbol):
-    """
-    獲取股票資訊，包含更多基本面數據 (PB, ROE, Beta)
-    """
     try:
         clean_symbol = standardize_symbol(symbol)
         if clean_symbol.isdigit(): query_symbol = f"{clean_symbol}.TW"
@@ -159,32 +168,28 @@ def get_stock_info_extended(symbol):
             
         stock = yf.Ticker(query_symbol)
         
-        # 預設值
         name = clean_symbol
         if clean_symbol in KNOWN_STOCKS: name = KNOWN_STOCKS[clean_symbol]
         
         info = {}
         try:
             info = stock.info
-            # 優先使用 Yahoo 的名稱，若無則用字典或代號
             api_name = info.get('longName') or info.get('shortName')
             if api_name: name = api_name
         except: pass
         
-        # 安全獲取數據的 Helper
         def get_val(key, default=None):
             return info.get(key, default)
 
         fundamentals = {
             'pe': get_val('trailingPE'),
             'yield': get_val('dividendYield'),
-            'pb': get_val('priceToBook'),         # 股價淨值比
-            'roe': get_val('returnOnEquity'),     # 股東權益報酬率
-            'beta': get_val('beta'),              # 波動率 (Beta)
-            'marketCap': get_val('marketCap')     # 市值
+            'pb': get_val('priceToBook'),
+            'roe': get_val('returnOnEquity'),
+            'beta': get_val('beta'),
+            'marketCap': get_val('marketCap')
         }
         
-        # 格式化百分比
         if fundamentals['yield']: fundamentals['yield'] *= 100
         if fundamentals['roe']: fundamentals['roe'] *= 100
             
@@ -192,35 +197,30 @@ def get_stock_info_extended(symbol):
     except: 
         return symbol, symbol, {}
 
-# --- 4. 技術分析與策略 ---
+# --- 4. 技術分析 ---
 def calculate_technicals(df):
     df['MA5'] = df['Close'].rolling(window=5).mean()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
     
-    # 布林通道
     std20 = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['MA20'] + (std20 * 2)
     df['BB_Lower'] = df['MA20'] - (std20 * 2)
     
-    # 成交量均線
     df['VolMA5'] = df['Volume'].rolling(window=5).mean()
     
-    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
     df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['Signal_Line']
     
-    # KD
     low_min = df['Low'].rolling(window=9).min()
     high_max = df['High'].rolling(window=9).max()
     df['RSV'] = (df['Close'] - low_min) / (high_max - low_min) * 100
@@ -238,7 +238,6 @@ def calculate_technicals(df):
 
 def analyze_full_signal(symbol):
     try:
-        # 1. 獲取個股資料
         q_sym, name, fund = get_stock_info_extended(symbol)
         stock = yf.Ticker(q_sym)
         df = stock.history(period="1y")
@@ -248,24 +247,20 @@ def analyze_full_signal(symbol):
         df = calculate_technicals(df)
         last = df.iloc[-1]
         
-        # 2. 獲取比較基準 (0050.TW) 進行績效 PK
         try:
             benchmark = yf.Ticker("0050.TW").history(period="1y")['Close']
-            # 計算近一年報酬率
             stock_ret = (df['Close'].iloc[-1] / df['Close'].iloc[0] - 1) * 100
             bench_ret = (benchmark.iloc[-1] / benchmark.iloc[0] - 1) * 100
             perf_diff = stock_ret - bench_ret
         except:
             stock_ret, bench_ret, perf_diff = 0, 0, 0
 
-        # --- 策略判斷 ---
         close = last['Close']
         ma5, ma20, ma60 = last['MA5'], last['MA20'], last['MA60']
         rsi, k, d = last['RSI'], last['K'], last['D']
         macd_hist = last['MACD_Hist']
         vol, vol_ma5 = last['Volume'], last['VolMA5']
         
-        # 短期策略
         if close > ma5 and k > d and vol > vol_ma5:
             st_sig = {"txt": "🔴 短線買進", "col": "#D32F2F", "desc": "站上5日線+帶量+KD金叉"}
         elif rsi < 25:
@@ -277,7 +272,6 @@ def analyze_full_signal(symbol):
         else:
             st_sig = {"txt": "🟠 持有/觀望", "col": "#FF9800", "desc": "短期震盪整理"}
 
-        # 中期策略
         if close > ma20 and macd_hist > 0:
             mt_sig = {"txt": "🔴 波段買進", "col": "#D32F2F", "desc": "站穩月線+MACD多頭"}
         elif close < ma20 and macd_hist < 0:
@@ -287,7 +281,6 @@ def analyze_full_signal(symbol):
         else:
             mt_sig = {"txt": "⚪ 弱勢整理", "col": "#666666", "desc": "股價受制於月線"}
 
-        # 長期策略
         is_bull_align = ma5 > ma20 and ma20 > ma60
         if close > ma60 and is_bull_align:
             lt_sig = {"txt": "🔴 長線加碼", "col": "#D32F2F", "desc": "均線多頭排列"}
@@ -309,21 +302,21 @@ def analyze_full_signal(symbol):
         return df, analysis, benchmark
     except: return None, None, None
 
-# --- 5. 資產計算 ---
+# --- 5. 資產計算 (更新：雙幣別計算) ---
 def get_sort_rank(t_type):
     t_type = str(t_type)
     if "Buy" in t_type or "買" in t_type or "配股" in t_type: return 1
     if "Sell" in t_type or "賣" in t_type: return 2
     return 3
 
-def calculate_full_portfolio(df):
+def calculate_full_portfolio(df, rate):
     portfolio = {}
     monthly_pnl = {}
     
-    # 日期標準化與排序
     df['日期'] = df['日期'].apply(standardize_date)
     df['日期'] = pd.to_datetime(df['日期'], errors='coerce') 
     df = df.dropna(subset=['日期'])
+    
     df['Rank'] = df['類別'].apply(get_sort_rank)
     df = df.sort_values(by=['日期', 'Rank'])
     
@@ -338,7 +331,8 @@ def calculate_full_portfolio(df):
         date_str = row['日期'].strftime("%Y-%m")
         
         if sym not in portfolio:
-            portfolio[sym] = {'Name': name, 'Qty': 0, 'Cost': 0, 'Realized': 0, 'Div': 0}
+            # 加入 IsUS 標記
+            portfolio[sym] = {'Name': name, 'Qty': 0, 'Cost': 0, 'Realized': 0, 'Div': 0, 'IsUS': not is_tw_stock(sym)}
         if date_str not in monthly_pnl: monthly_pnl[date_str] = 0
             
         p = portfolio[sym]
@@ -357,17 +351,25 @@ def calculate_full_portfolio(df):
                 revenue = (qty * price) - fees - tax
                 profit = revenue - cost_sold
                 p['Realized'] += profit
-                monthly_pnl[date_str] += profit
+                
+                # 月損益統一轉台幣計算，以便畫圖
+                profit_twd = profit * rate if p['IsUS'] else profit
+                monthly_pnl[date_str] += profit_twd
+                
                 p['Qty'] -= qty
                 p['Cost'] -= cost_sold
             else:
                 revenue = (qty * price) - fees - tax
                 p['Realized'] += revenue
-                monthly_pnl[date_str] += revenue
+                
+                rev_twd = revenue * rate if p['IsUS'] else revenue
+                monthly_pnl[date_str] += rev_twd
+                
                 p['Qty'] -= qty
         elif is_div:
             p['Div'] += price
-            monthly_pnl[date_str] += price
+            div_twd = price * rate if p['IsUS'] else price
+            monthly_pnl[date_str] += div_twd
             p['Qty'] += qty
 
     active_syms = [s for s, v in portfolio.items() if v['Qty'] > 0]
@@ -376,19 +378,27 @@ def calculate_full_portfolio(df):
         try:
             q_list = []
             for s in active_syms:
-                if s.isdigit(): q_list.append(f"{s}.TW")
-                else: q_list.append(s)
+                if is_tw_stock(s):
+                    # 修正：若台股標準化後是 2330，要加 .TW
+                    if s.isdigit(): q_list.append(f"{s}.TW")
+                    else: q_list.append(s)
+                else:
+                    q_list.append(s) # 美股直接用代號
             
             data = yf.Tickers(" ".join(q_list))
             for i, s in enumerate(active_syms):
                 try:
-                    h = data.tickers[q_list[i]].history(period="1d")
+                    # 對應回查詢代號
+                    qs = q_list[i] 
+                    h = data.tickers[qs].history(period="1d")
                     curr_prices[s] = h['Close'].iloc[-1] if not h.empty else 0
                 except: curr_prices[s] = 0
         except: pass
         
     res = []
-    tot_mkt, tot_unreal, tot_real = 0, 0, 0
+    tot_mkt_twd = 0
+    tot_unreal_twd = 0
+    tot_real_twd = 0
     
     for sym, v in portfolio.items():
         cp = curr_prices.get(sym, 0)
@@ -396,19 +406,32 @@ def calculate_full_portfolio(df):
         
         mkt = v['Qty'] * cp
         unreal = mkt - v['Cost'] if v['Qty'] > 0 else 0
+        realized = v['Realized'] + v['Div']
         
-        tot_mkt += mkt
-        tot_unreal += unreal
-        tot_real += (v['Realized'] + v['Div'])
+        # 彙總計算 (全部換算回台幣)
+        if v['IsUS']:
+            tot_mkt_twd += mkt * rate
+            tot_unreal_twd += unreal * rate
+            tot_real_twd += realized * rate
+        else:
+            tot_mkt_twd += mkt
+            tot_unreal_twd += unreal
+            tot_real_twd += realized
         
         if v['Qty'] != 0 or v['Realized']!=0 or v['Div']!=0:
             res.append({
-                "代號": sym, "名稱": v['Name'], "庫存": v['Qty'], "均價": v['Cost']/v['Qty'] if v['Qty']>0 else 0,
-                "現價": cp, "市值": mkt, "未實現": unreal, "已實現+息": v['Realized']+v['Div']
+                "代號": sym, "名稱": v['Name'], 
+                "庫存": v['Qty'], 
+                "均價": v['Cost']/v['Qty'] if v['Qty']>0 else 0,
+                "現價": cp, 
+                "市值": mkt, 
+                "未實現": unreal, 
+                "已實現+息": realized,
+                "IsUS": v['IsUS'] # 標記給前端顯示用
             })
             
     m_df = pd.DataFrame(list(monthly_pnl.items()), columns=['Month', 'PnL']).sort_values('Month')
-    return pd.DataFrame(res), tot_mkt, tot_unreal, tot_real, m_df
+    return pd.DataFrame(res), tot_mkt_twd, tot_unreal_twd, tot_real_twd, m_df
 
 def convert_to_excel(df):
     output = io.BytesIO()
@@ -420,7 +443,7 @@ def convert_to_excel(df):
 st.title("💎 專業投資戰情室 Pro")
 tab1, tab2, tab3, tab4 = st.tabs(["📝 交易", "📥 匯入", "📊 趨勢戰情", "💰 資產透視"])
 
-# Tab 1: 單筆輸入
+# Tab 1: 單筆
 with tab1:
     c1, c2 = st.columns([1, 2])
     with c1:
@@ -433,7 +456,6 @@ with tab1:
         rsym = isym
         if isym: 
             check_sym = standardize_symbol(isym)
-            # 使用擴充版獲取資訊
             rsym, name, _ = get_stock_info_extended(check_sym)
         
         st.info(f"股票: **{name}**")
@@ -458,11 +480,12 @@ with tab1:
 with tab2:
     st.markdown("### 📥 批次匯入")
     template_data = {
-        "日期": ["2024-01-01", "2024-06-15"], 
-        "類別": ["買入", "股息"], 
-        "代號": ["0050", "2330"],
-        "名稱": ["元大台灣50", "台積電"], 
-        "價格": [150, 5000], "股數": [1000, 0], "手續費": [20, 10], "交易稅": [0, 0]
+        "日期": ["2024-01-01", "2024-02-01", "2024-07-15", "2024-08-20", "2024-09-01"], 
+        "類別": ["買入", "賣出", "股息", "股息", "股息"], 
+        "代號": ["0050", "0050", "2330", "2884", "2317"],
+        "名稱": ["元大台灣50", "元大台灣50", "台積電", "玉山金", "鴻海"], 
+        "價格": [150, 160, 5000, 0, 2000], "股數": [1000, 500, 0, 50, 20], 
+        "手續費": [20, 20, 10, 0, 0], "交易稅": [0, 100, 0, 0, 0]
     }
     st.download_button("📥 下載範本", convert_to_excel(pd.DataFrame(template_data)), "template.xlsx")
     
@@ -509,7 +532,7 @@ with tab2:
             st.success(f"匯入完成！ {msg}")
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
-# Tab 3: 全方位戰情 (包含體質分析 + 大盤 PK)
+# Tab 3: 策略
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
     market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
@@ -528,7 +551,6 @@ with tab3:
             elif "賣" in tt or "Sell" in tt: inventory[sym] = inventory.get(sym, 0) - q
             names[sym] = row['名稱']
         
-        # 只顯示庫存 > 0
         active_list = [f"{k} {names[k]}" for k, v in inventory.items() if v > 0.1]
         col_sel, col_search = st.columns([1, 1])
         with col_sel:
@@ -539,90 +561,79 @@ with tab3:
         target = manual if manual else (sel.split()[0] if sel else None)
         
         if target:
-            with st.spinner("AI 正在進行六大體質分析與大盤比對..."):
+            with st.spinner("AI 正在分析..."):
                 hist, ana, benchmark_hist = analyze_full_signal(target)
-            
             if hist is not None:
-                # 1. 價格與基本指標
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("股價", f"{ana['metrics']['close']:.2f}")
-                m2.metric("RSI (14)", f"{ana['metrics']['rsi']:.1f}")
-                m3.metric("KD (K值)", f"{ana['metrics']['k']:.1f}")
+                m2.metric("RSI", f"{ana['metrics']['rsi']:.1f}")
+                m3.metric("KD", f"{ana['metrics']['k']:.1f}")
                 
-                # 績效 PK (個股 vs 大盤)
                 diff = ana['metrics']['perf_diff']
-                diff_color = "normal" if diff == 0 else ("inverse" if diff < 0 else "normal") # 正數綠色(台股紅漲綠跌邏輯相反，這裡Streamlit預設紅漲)
-                # Streamlit metric delta: 紅是負，綠是正。台股習慣紅漲。
-                # 這裡顯示年報酬率
-                m4.metric("近一年報酬 vs 0050", 
-                          f"{ana['metrics']['perf_stock']:.1f}%", 
-                          delta=f"{diff:+.1f}% (領先)" if diff>0 else f"{diff:+.1f}% (落後)")
+                m4.metric("vs 0050", f"{ana['metrics']['perf_stock']:.1f}%", f"{diff:+.1f}%")
 
-                # 2. 策略訊號卡片
                 st.write("")
                 s1, s2, s3 = st.columns(3)
-                for col, key, title in zip([s1, s2, s3], ['st', 'mt', 'lt'], ['⚡ 短期 (5日線)', '🌊 中期 (月線)', '🏔️ 長期 (季線)']):
+                for col, key, title in zip([s1, s2, s3], ['st', 'mt', 'lt'], ['⚡ 短期 (5日)', '🌊 中期 (月線)', '🏔️ 長期 (季線)']):
                     with col:
                         st.markdown(f"""
                         <div class="strategy-card" style="border-left:5px solid {ana[key]['col']};">
-                            <h4 style="margin:0; color:#333;">{title}</h4>
+                            <h4 style="margin:0;">{title}</h4>
                             <h3 style="margin:5px 0; color:{ana[key]['col']};">{ana[key]['txt']}</h3>
                             <p style="font-size:13px; color:#666; margin:0;">{ana[key]['desc']}</p>
                         </div>""", unsafe_allow_html=True)
 
-                # 3. 六大體質雷達 (使用 Metrics 呈現比較清晰)
-                st.subheader("🏥 體質健檢 (Fundamentals)")
+                st.subheader("🏥 體質健檢")
                 f = ana['fund']
                 f1, f2, f3, f4, f5 = st.columns(5)
-                f1.metric("本益比 P/E", f"{f.get('pe', 0):.1f}" if f.get('pe') else "N/A")
-                f2.metric("股價淨值比 P/B", f"{f.get('pb', 0):.2f}" if f.get('pb') else "N/A")
-                f3.metric("殖利率 Yield", f"{f.get('yield', 0):.2f}%" if f.get('yield') else "N/A")
+                f1.metric("P/E", f"{f.get('pe', 0):.1f}" if f.get('pe') else "N/A")
+                f2.metric("P/B", f"{f.get('pb', 0):.2f}" if f.get('pb') else "N/A")
+                f3.metric("Yield", f"{f.get('yield', 0):.2f}%" if f.get('yield') else "N/A")
                 f4.metric("ROE", f"{f.get('roe', 0):.1f}%" if f.get('roe') else "N/A")
-                f5.metric("波動率 Beta", f"{f.get('beta', 0):.2f}" if f.get('beta') else "N/A")
+                f5.metric("Beta", f"{f.get('beta', 0):.2f}" if f.get('beta') else "N/A")
                 
-                # 4. 圖表區
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2])
-                # K線 + 布林
                 fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], increasing_line_color='#D32F2F', decreasing_line_color='#2E7D32', name='K線'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Upper'], line=dict(color='rgba(0,100,255,0.3)', width=1), name='布林上軌'), row=1, col=1)
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Lower'], line=dict(color='rgba(0,100,255,0.3)', width=1), name='布林下軌', fill='tonexty', fillcolor='rgba(0,100,255,0.05)'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Upper'], line=dict(color='rgba(0,100,255,0.3)', width=1), name='上軌'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['BB_Lower'], line=dict(color='rgba(0,100,255,0.3)', width=1), name='下軌', fill='tonexty'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='#FF9800'), name='月線'), row=1, col=1)
-                # KD
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['K'], line=dict(color='#9C27B0'), name='K'), row=2, col=1)
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['D'], line=dict(color='#E91E63'), name='D'), row=2, col=1)
-                # MACD
                 colors = ['#D32F2F' if v >= 0 else '#2E7D32' for v in hist['MACD_Hist']]
                 fig.add_trace(go.Bar(x=hist.index, y=hist['MACD_Hist'], marker_color=colors, name='MACD'), row=3, col=1)
-                
                 fig.update_layout(height=800, template="plotly_white", xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
-            else: st.warning("查無資料或代號錯誤")
+            else: st.warning("查無資料")
 
 # Tab 4: 資產透視
 with tab4:
     st.markdown("### 💰 資產透視")
-    filter_col1, filter_col2 = st.columns([2, 1])
+    filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1])
     with filter_col1:
         view_filter = st.radio("顯示市場", ["全部", "台股僅見", "美股僅見"], horizontal=True)
     with filter_col2:
         st.write("")
         st.write("") 
-        show_only_held = st.checkbox("只顯示目前持倉 (隱藏已出清)", value=False)
+        show_only_held = st.checkbox("只顯示目前持倉", value=False)
     
+    rate = get_exchange_rate()
+    with filter_col3:
+        st.metric("目前 USD/TWD 匯率", f"{rate:.2f}")
+
     df_raw = load_data()
     if not df_raw.empty:
         if "台股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'TW']
         elif "美股" in view_filter: df_raw = df_raw[df_raw['Market'] == 'US']
         
         if not df_raw.empty:
-            p_df, t_mkt, t_unreal, t_real, m_df = calculate_full_portfolio(df_raw)
+            p_df, t_mkt, t_unreal, t_real, m_df = calculate_full_portfolio(df_raw, rate)
             if show_only_held: p_df = p_df[p_df['庫存'] > 0]
             
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("總市值", f"${t_mkt:,.0f}")
-            k2.metric("未實現損益", f"${t_unreal:,.0f}", delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", delta_color="normal")
-            k3.metric("已實現+股息", f"${t_real:,.0f}")
-            k4.metric("總損益", f"${(t_unreal+t_real):,.0f}")
+            k1.metric("總市值 (TWD)", f"${t_mkt:,.0f}")
+            k2.metric("未實現損益 (TWD)", f"${t_unreal:,.0f}", delta=f"{(t_unreal/t_mkt*100):.1f}%" if t_mkt>0 else "0%", delta_color="normal")
+            k3.metric("已實現+股息 (TWD)", f"${t_real:,.0f}")
+            k4.metric("總損益 (TWD)", f"${(t_unreal+t_real):,.0f}")
             st.markdown("---")
             
             g1, g2 = st.columns([1, 1])
@@ -640,7 +651,26 @@ with tab4:
             
             st.subheader("📋 資產明細表")
             if not p_df.empty:
-                st.dataframe(p_df.style.format("{:,.0f}", subset=["庫存", "市值", "未實現", "已實現+息"]).format("{:.2f}", subset=["均價", "現價"]).map(lambda x: 'color: #D32F2F; font-weight:bold' if x > 0 else 'color: #2E7D32; font-weight:bold', subset=['未實現']), use_container_width=True)
-            else: st.info("無符合條件資料")
+                # 雙幣別格式化
+                def format_row(row, col):
+                    val = row[col]
+                    if row['IsUS']:
+                        val_twd = val * rate
+                        return f"${val:,.2f} / NT${val_twd:,.0f}"
+                    return f"{val:,.2f}"
+
+                # 複製一個顯示用的 df
+                display_df = p_df.copy()
+                for col in ['均價', '現價', '市值', '未實現', '已實現+息']:
+                    display_df[col] = display_df.apply(lambda r: format_row(r, col), axis=1)
+                
+                # 庫存不需換算
+                display_df['庫存'] = display_df['庫存'].apply(lambda x: f"{x:,.0f}")
+                
+                # 隱藏輔助欄位
+                display_df = display_df.drop(columns=['IsUS'])
+                
+                st.dataframe(display_df, use_container_width=True)
+            else: st.info("無資料")
         else: st.info("該市場無資料")
     else: st.info("資料庫無資料")
