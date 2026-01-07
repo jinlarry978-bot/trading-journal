@@ -11,56 +11,53 @@ import datetime
 import io
 import re
 
-# --- 1. 頁面設定 (寬版 + 標題) ---
+# --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
 
-# --- 2. 核心 CSS 美化工程 ---
+# --- 2. CSS 美化工程 (含手機 RWD 優化) ---
 st.markdown("""
     <style>
-    /* 引入 Google Fonts (Inter 字體，適合金融數字顯示) */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
 
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
 
-    /* 整體背景微調 */
-    .stApp {
-        background-color: #F8F9FA;
-    }
+    .stApp { background-color: #F8F9FA; }
 
-    /* KPI 卡片設計 (帶懸浮特效) */
+    /* === 卡片通用樣式 === */
     .kpi-card {
         background: linear-gradient(135deg, #FFFFFF 0%, #FFFFFF 100%);
         border: 1px solid #E9ECEF;
         padding: 20px;
         border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.02);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
         height: 100%;
         display: flex;
         flex-direction: column;
         justify-content: center;
         transition: all 0.3s ease;
+        /* 手機版堆疊時增加下距 */
+        margin-bottom: 10px; 
     }
     .kpi-card:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 10px 15px rgba(0,0,0,0.05);
+        transform: translateY(-3px);
+        box-shadow: 0 8px 15px rgba(0,0,0,0.05);
         border-color: #CED4DA;
     }
+    
     .kpi-label {
         font-size: 14px;
         color: #6C757D;
         font-weight: 600;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
-        margin-bottom: 8px;
+        margin-bottom: 6px;
     }
     .kpi-value-main {
-        font-size: 28px;
+        font-size: 26px; /* 電腦版字體 */
         font-weight: 800;
         color: #212529;
         line-height: 1.1;
-        letter-spacing: -0.5px;
     }
     .kpi-value-sub {
         font-size: 15px;
@@ -69,52 +66,51 @@ st.markdown("""
         margin-top: 4px;
     }
     .kpi-delta {
-        font-size: 14px;
+        font-size: 13px;
         font-weight: 700;
         margin-top: 8px;
         padding: 2px 8px;
         border-radius: 4px;
         width: fit-content;
     }
-    
-    /* 漲跌顏色定義 (台股紅漲綠跌) */
-    .delta-pos { color: #D93535; background-color: rgba(217, 53, 53, 0.1); }
-    .delta-neg { color: #35A853; background-color: rgba(53, 168, 83, 0.1); }
-    .delta-neutral { color: #6C757D; background-color: rgba(108, 117, 125, 0.1); }
 
-    /* 策略訊號卡片 */
+    /* 漲跌顏色定義 */
+    .delta-pos { color: #D93535; background-color: rgba(217, 53, 53, 0.08); }
+    .delta-neg { color: #35A853; background-color: rgba(53, 168, 83, 0.08); }
+    .delta-neutral { color: #6C757D; background-color: rgba(108, 117, 125, 0.08); }
+
+    /* === 策略卡片 === */
     .strategy-card {
-        padding: 20px; 
+        padding: 18px; 
         border-radius: 12px; 
         margin-bottom: 15px; 
-        box-shadow: 0 4px 6px rgba(0,0,0,0.02);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
         background-color: white;
         border: 1px solid #E9ECEF;
-        transition: transform 0.2s;
     }
-    .strategy-card:hover {
-        transform: scale(1.02);
-    }
-    .strategy-title { margin: 0; color: #495057; font-weight: 700; font-size: 16px; }
-    .strategy-signal { margin: 10px 0; font-weight: 800; font-size: 22px; }
+    .strategy-title { margin: 0; color: #495057; font-weight: 700; font-size: 15px; }
+    .strategy-signal { margin: 8px 0; font-weight: 800; font-size: 20px; }
     .strategy-desc { font-size: 13px; color: #868E96; margin: 0; }
 
-    /* 原生 Metric 優化 */
+    /* === 📱 手機版專用優化 (RWD Media Query) === */
+    @media (max-width: 640px) {
+        /* 縮小 KPI 主數字 */
+        .kpi-value-main { font-size: 22px !important; }
+        /* 縮小卡片內距，節省空間 */
+        .kpi-card { padding: 15px !important; }
+        /* 調整卡片標題 */
+        .kpi-label { font-size: 12px !important; }
+        /* 策略卡片緊湊化 */
+        .strategy-signal { font-size: 18px !important; }
+        /* 隱藏部分不重要的裝飾邊距 */
+        .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
+    }
+    
     div[data-testid="stMetric"] {
         background-color: #FFFFFF;
         border: 1px solid #E9ECEF;
-        padding: 20px;
+        padding: 15px;
         border-radius: 12px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-    }
-    div[data-testid="stMetricLabel"] p { font-weight: 600; color: #6C757D; }
-    div[data-testid="stMetricValue"] { font-weight: 800 !important; color: #212529; }
-
-    /* 表格優化 */
-    div[data-testid="stDataFrame"] {
-        border: 1px solid #E9ECEF;
-        border-radius: 8px;
-        overflow: hidden;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -224,7 +220,6 @@ def get_exchange_rate():
         return 32.5 
     except: return 32.5
 
-# 直通寫入
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -338,10 +333,8 @@ def analyze_full_signal(symbol):
         macd_hist = last['MACD_Hist']
         vol, vol_ma5 = last['Volume'], last['VolMA5']
         
-        # 策略邏輯
-        st_sig, mt_sig, lt_sig = {}, {}, {}
+        st_sig = {}; mt_sig = {}; lt_sig = {}
         
-        # 短期
         if close > ma5 and k > d and vol > vol_ma5:
             st_sig = {"txt": "🔴 短線買進", "col": "#D32F2F", "desc": "站上5日線+帶量+KD金叉"}
         elif rsi < 25:
@@ -353,7 +346,6 @@ def analyze_full_signal(symbol):
         else:
             st_sig = {"txt": "🟠 持有/觀望", "col": "#FF9800", "desc": "短期震盪整理"}
 
-        # 中期
         if close > ma20 and macd_hist > 0:
             mt_sig = {"txt": "🔴 波段買進", "col": "#D32F2F", "desc": "站穩月線+MACD多頭"}
         elif close < ma20 and macd_hist < 0:
@@ -363,7 +355,6 @@ def analyze_full_signal(symbol):
         else:
             mt_sig = {"txt": "⚪ 弱勢整理", "col": "#6C757D", "desc": "股價受制於月線"}
 
-        # 長期
         is_bull_align = ma5 > ma20 and ma20 > ma60
         if close > ma60 and is_bull_align:
             lt_sig = {"txt": "🔴 長線加碼", "col": "#D32F2F", "desc": "均線多頭排列"}
@@ -606,16 +597,9 @@ with tab3:
                 m2.metric("RSI", f"{ana['metrics']['rsi']:.1f}")
                 m3.metric("KD", f"{ana['metrics']['k']:.1f}")
                 m4.metric("vs 0050", f"{ana['metrics']['perf_stock']:.1f}%", f"{ana['metrics']['perf_diff']:+.1f}%")
-                
                 st.write(""); s1, s2, s3 = st.columns(3)
                 for col, key, title in zip([s1, s2, s3], ['st', 'mt', 'lt'], ['⚡ 短期', '🌊 中期', '🏔️ 長期']):
-                    with col: st.markdown(f"""
-                        <div class="strategy-card" style="border-left:5px solid {ana[key]['col']};">
-                            <h4 class="strategy-title">{title}</h4>
-                            <h3 style="margin:5px 0; color:{ana[key]['col']};">{ana[key]['txt']}</h3>
-                            <p style="font-size:13px; color:#666; margin:0;">{ana[key]['desc']}</p>
-                        </div>""", unsafe_allow_html=True)
-                
+                    with col: st.markdown(f"""<div class="strategy-card" style="border-left:5px solid {ana[key]['col']};"><h4 class="strategy-title">{title}</h4><h3 style="margin:5px 0; color:{ana[key]['col']};">{ana[key]['txt']}</h3><p style="font-size:13px; color:#666; margin:0;">{ana[key]['desc']}</p></div>""", unsafe_allow_html=True)
                 fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2])
                 fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], increasing_line_color='#D32F2F', decreasing_line_color='#2E7D32', name='K線'), row=1, col=1)
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['MA20'], line=dict(color='#FF9800', width=1.5), name='月線'), row=1, col=1)
@@ -635,7 +619,7 @@ with tab4:
     filter_col1, filter_col2, filter_col3 = st.columns([1, 1, 1])
     with filter_col1: view_filter = st.radio("顯示市場", ["全部", "台股僅見", "美股僅見"], horizontal=True)
     with filter_col2: st.write(""); st.write(""); show_only_held = st.checkbox("只顯示目前持倉", value=False)
-    rate = get_exchange_rate()
+    rate = get_exchange_rate(); 
     with filter_col3: st.metric("目前 USD/TWD 匯率", f"{rate:.2f}")
 
     df_raw = load_data()
@@ -646,7 +630,6 @@ with tab4:
             p_df, totals, m_df = calculate_full_portfolio(df_raw, rate)
             if show_only_held: p_df = p_df[p_df['庫存'] > 0]
             
-            # Helper: Render KPI Card
             def kpi_card_html(label, val_main, val_sub=None, delta_str=None, delta_class="delta-neutral"):
                 sub_html = f'<div class="kpi-value-sub">{val_sub}</div>' if val_sub else ''
                 delta_html = f'<div class="kpi-delta {delta_class}">{delta_str}</div>' if delta_str else ''
@@ -656,17 +639,13 @@ with tab4:
             is_us_view = "美股" in view_filter
             t_usd = totals['usd']; t_twd = totals['twd']
             
-            # Logic for Dual Currency Display
             if is_us_view:
                 with k1: st.markdown(kpi_card_html("總市值", f"US$ {t_usd['mkt']:,.0f}", f"≈ NT$ {t_twd['mkt']:,.0f}"), unsafe_allow_html=True)
-                
                 d_val = (t_usd['unreal']/t_usd['mkt']*100) if t_usd['mkt']>0 else 0
                 d_str = f"{'↑' if d_val>0 else '↓'} {d_val:.1f}%"
                 d_cls = "delta-pos" if d_val>0 else ("delta-neg" if d_val<0 else "delta-neutral")
                 with k2: st.markdown(kpi_card_html("未實現損益", f"US$ {t_usd['unreal']:,.0f}", f"≈ NT$ {t_twd['unreal']:,.0f}", d_str, d_cls), unsafe_allow_html=True)
-                
                 with k3: st.markdown(kpi_card_html("已實現+股息", f"US$ {t_usd['real']:,.0f}", f"≈ NT$ {t_twd['real']:,.0f}"), unsafe_allow_html=True)
-                
                 tot_usd = t_usd['unreal'] + t_usd['real']; tot_twd = t_twd['unreal'] + t_twd['real']
                 with k4: st.markdown(kpi_card_html("總損益", f"US$ {tot_usd:,.0f}", f"≈ NT$ {tot_twd:,.0f}"), unsafe_allow_html=True)
             else:
