@@ -95,7 +95,6 @@ def batch_save_data_smart(rows, market_type):
         existing_signatures = set()
         if not existing_df.empty:
             for _, r in existing_df.iterrows():
-                # 使用安全轉換防止比對時報錯
                 p = safe_float(r.get('價格', 0))
                 q = safe_float(r.get('股數', 0))
                 sig = (str(r['日期']), str(r['代號']), str(r['類別']), p, q)
@@ -206,14 +205,11 @@ def analyze_full_signal(symbol):
     except: return None, {}, 0, 0
 
 # --- 5. 資產計算 ---
-# 新增一個安全轉換函數，解決 NaTType 問題
 def safe_float(val):
     try:
-        if pd.isna(val) or val == "":
-            return 0.0
+        if pd.isna(val) or val == "": return 0.0
         return float(val)
-    except:
-        return 0.0
+    except: return 0.0
 
 def calculate_full_portfolio(df):
     portfolio = {}
@@ -227,12 +223,10 @@ def calculate_full_portfolio(df):
         if sym.isdigit() and len(sym) < 4: sym = sym.zfill(4)
         
         name = row['名稱']
-        # 使用 safe_float 來處理可能的空值或異常格式
         qty = safe_float(row['股數'])
         price = safe_float(row['價格'])
         fees = safe_float(row['手續費'])
         tax = safe_float(row['交易稅'])
-        
         t_type = str(row['類別'])
         date_str = row['日期'].strftime("%Y-%m")
         
@@ -345,15 +339,10 @@ with tab1:
             if save_data([str(idate), type_val, clean_sym, name, iprice, iqty, ifees, itax, tot]): 
                 st.success(f"已儲存至 {'台股' if is_tw_stock(rsym) else '美股'} 分頁")
 
-# Tab 2: 匯入 (強力防呆版)
+# Tab 2: 匯入 (修正進度條邏輯)
 with tab2:
     st.markdown("### 📥 批次匯入 (支援 Excel/CSV)")
-    st.info("""
-    **填寫說明 (針對股息)：**
-    * **現金股息**：請填在 **「價格」** 欄位 (代表領到的現金總額)，股數填 0。
-    * **股票股利**：請填在 **「股數」** 欄位 (代表領到的股子)，價格填 0。
-    * **兩者皆有**：請填在同一行，價格填現金總額，股數填配股數。
-    """)
+    st.info("支援 Excel 格式，請參考下方範本填寫。")
     
     template_data = {
         "日期": ["2024-01-01", "2024-02-01", "2024-07-15", "2024-08-20", "2024-09-01"], 
@@ -387,18 +376,18 @@ with tab2:
             else:
                 df_u = pd.read_excel(uploaded_file, dtype={'代號': str})
             
-            # 防呆 1: 刪除完全空白的列
+            # 防呆：刪除空白列
             df_u = df_u.dropna(how='all')
-            # 防呆 2: 刪除沒有日期的列
             df_u = df_u.dropna(subset=['日期'])
             
             tw_rows = []
             us_rows = []
-            bar = st.progress(0)
+            bar = st.progress(0.0) # 初始化為 0.0 (Float)
             status = st.empty()
             total = len(df_u)
             
-            for i, r in df_u.iterrows():
+            # 修正關鍵：使用 enumerate 重新計數，避免 Index 不連續導致進度條破表
+            for i, (index, r) in enumerate(df_u.iterrows()):
                 rs = str(r['代號']).strip().upper()
                 if rs.isdigit() and len(rs)<4: rs = rs.zfill(4)
                 
@@ -407,14 +396,12 @@ with tab2:
                 tt_raw = str(r['類別'])
                 tt = "買入" if any(x in tt_raw for x in ["Buy","買"]) else "賣出" if any(x in tt_raw for x in ["Sell","賣"]) else "股息"
                 
-                # 使用 safe_float 防呆
                 q = safe_float(r['股數'])
                 p = safe_float(r['價格'])
                 f = safe_float(r['手續費'])
                 t = safe_float(r['交易稅'])
                 
                 amt = -(q*p+f) if "買" in tt else (q*p-f-t) if "賣" in tt else p
-                
                 clean_sym = q_sym.replace('.TW', '')
                 row_data = [str(r['日期']), tt, clean_sym, name, p, q, f, t, amt]
                 
@@ -422,7 +409,11 @@ with tab2:
                 else: us_rows.append(row_data)
                 
                 if total > 0:
-                    bar.progress((i+1)/total)
+                    # 強制鎖定在 0.0 ~ 1.0 之間
+                    val = (i + 1) / total
+                    if val > 1.0: val = 1.0
+                    bar.progress(val)
+                    
                 status.text(f"處理中: {clean_sym}")
             
             msg = ""
@@ -434,13 +425,13 @@ with tab2:
                 msg += f"🇺🇸 美股: 新增 {added_us} 筆 (過濾重複 {dup_us} 筆)。"
             
             if not tw_rows and not us_rows:
-                st.warning("沒有資料被匯入，請檢查檔案內容是否空白。")
+                st.warning("無有效資料匯入。")
             else:
                 st.success(f"匯入完成！ {msg}")
             
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
-# Tab 3 (保持不變)
+# Tab 3 & 4 (保持不變)
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
     market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
@@ -453,7 +444,7 @@ with tab3:
         for _, row in df_raw.iterrows():
             sym = str(row['代號'])
             tt = str(row['類別'])
-            q = safe_float(row['股數']) # 使用 safe_float
+            q = safe_float(row['股數'])
             if "買" in tt or "Buy" in tt or "股" in tt: inventory[sym] = inventory.get(sym, 0) + q
             elif "賣" in tt or "Sell" in tt: inventory[sym] = inventory.get(sym, 0) - q
             names[sym] = row['名稱']
