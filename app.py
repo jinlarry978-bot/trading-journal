@@ -14,9 +14,12 @@ import re
 # --- 1. 頁面設定 ---
 st.set_page_config(page_title="專業投資戰情室 Pro", layout="wide", page_icon="💎")
 
+# CSS 優化：定義 KPI 卡片樣式
 st.markdown("""
     <style>
     .stApp {background-color: #F5F7F9;}
+    
+    /* 原生 Metric 樣式微調 */
     div[data-testid="stMetric"] {
         background-color: #FFFFFF;
         border: 1px solid #E0E0E0;
@@ -24,6 +27,48 @@ st.markdown("""
         border-radius: 8px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
+    
+    /* 客製化 KPI 卡片 (給美股雙幣用) */
+    .kpi-card {
+        background-color: #FFFFFF;
+        border: 1px solid #E0E0E0;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+    }
+    .kpi-label {
+        font-size: 14px;
+        color: #666;
+        margin-bottom: 4px;
+    }
+    .kpi-value-main {
+        font-size: 26px;
+        font-weight: 700;
+        color: #31333F;
+        line-height: 1.2;
+    }
+    .kpi-value-sub {
+        font-size: 15px;
+        color: #888;
+        font-weight: 500;
+        margin-top: 2px;
+        margin-bottom: 8px;
+    }
+    .kpi-delta {
+        font-size: 14px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+    }
+    .delta-pos { color: #D32F2F; } /* 紅漲 */
+    .delta-neg { color: #2E7D32; } /* 綠跌 (若習慣美股綠漲紅跌，可自行互換顏色碼) */
+    .delta-neutral { color: #666; }
+
+    /* 策略卡片樣式 */
     .strategy-card {
         padding: 15px; 
         border-radius: 10px; 
@@ -38,7 +83,7 @@ st.markdown("""
 SHEET_TW = "TW_Trades"
 SHEET_US = "US_Trades"
 
-# 內建熱門股字典 (Fallback 用)
+# 內建熱門股字典
 KNOWN_STOCKS = {
     '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息', 
     '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '006208': '富邦台50',
@@ -102,16 +147,11 @@ def safe_float(val):
     except: return 0.0
 
 def standardize_symbol(symbol):
-    """
-    代號標準化：
-    1. 去除單引號、空白
-    2. 純數字部分補零 (2碼補00, 3碼補00, 4碼不變)
-    """
     s = str(symbol).replace("'", "").strip().upper()
     if s.isdigit():
-        if len(s) == 3: return "00" + s  # 878 -> 00878
-        if len(s) == 2: return "00" + s  # 50 -> 0050
-        if len(s) < 4: return s.zfill(4) # 其他補零
+        if len(s) == 3: return "00" + s 
+        if len(s) == 2: return "00" + s 
+        if len(s) < 4: return s.zfill(4)
     return s
 
 def standardize_date(date_val):
@@ -146,7 +186,7 @@ def get_exchange_rate():
     except:
         return 32.5
 
-# 直通寫入模式 (不去重)
+# 直通寫入模式
 def batch_save_data_smart(rows, market_type):
     try:
         client = init_connection()
@@ -264,7 +304,6 @@ def analyze_full_signal(symbol):
         macd_hist = last['MACD_Hist']
         vol, vol_ma5 = last['Volume'], last['VolMA5']
         
-        # 策略邏輯
         if close > ma5 and k > d and vol > vol_ma5:
             st_sig = {"txt": "🔴 短線買進", "col": "#D32F2F", "desc": "站上5日線+帶量+KD金叉"}
         elif rsi < 25:
@@ -306,7 +345,7 @@ def analyze_full_signal(symbol):
         return df, analysis, benchmark
     except: return None, None, None
 
-# --- 5. 資產計算 (更新：分別計算 USD 和 TWD 總額) ---
+# --- 5. 資產計算 ---
 def get_sort_rank(t_type):
     t_type = str(t_type)
     if "Buy" in t_type or "買" in t_type or "配股" in t_type: return 1
@@ -394,13 +433,10 @@ def calculate_full_portfolio(df, rate):
         except: pass
         
     res = []
-    
-    # 初始化 TWD 總額 (給全覽用)
     tot_mkt_twd = 0
     tot_unreal_twd = 0
     tot_real_twd = 0
     
-    # 初始化 USD 總額 (給美股模式用)
     tot_mkt_usd = 0
     tot_unreal_usd = 0
     tot_real_usd = 0
@@ -413,13 +449,11 @@ def calculate_full_portfolio(df, rate):
         unreal = mkt - v['Cost'] if v['Qty'] > 0 else 0
         realized = v['Realized'] + v['Div']
         
-        # 累積 TWD 總額 (所有股票都換算)
         if v['IsUS']:
             tot_mkt_twd += mkt * rate
             tot_unreal_twd += unreal * rate
             tot_real_twd += realized * rate
             
-            # 累積 USD 總額 (只累加美股)
             tot_mkt_usd += mkt
             tot_unreal_usd += unreal
             tot_real_usd += realized
@@ -442,7 +476,6 @@ def calculate_full_portfolio(df, rate):
             
     m_df = pd.DataFrame(list(monthly_pnl.items()), columns=['Month', 'PnL']).sort_values('Month')
     
-    # 回傳所有總額數據
     totals = {
         "twd": {"mkt": tot_mkt_twd, "unreal": tot_unreal_twd, "real": tot_real_twd},
         "usd": {"mkt": tot_mkt_usd, "unreal": tot_unreal_usd, "real": tot_real_usd}
@@ -646,38 +679,55 @@ with tab4:
             p_df, totals, m_df = calculate_full_portfolio(df_raw, rate)
             if show_only_held: p_df = p_df[p_df['庫存'] > 0]
             
-            # --- KPI 顯示邏輯 (雙幣別核心) ---
-            k1, k2, k3, k4 = st.columns(4)
-            
-            # Helper to display Dual Currency
-            def show_kpi(label, usd_val, twd_val, is_us_mode):
-                if is_us_mode:
-                    # 美股模式：顯示 US$ ... / NT$ ...
-                    val_str = f"US$ {usd_val:,.0f} \n (NT$ {twd_val:,.0f})"
-                    st.metric(label, val_str)
-                else:
-                    # 台股或全部：只顯示 NT$
-                    st.metric(label, f"NT$ {twd_val:,.0f}")
+            # Helper to create custom KPI card HTML
+            def kpi_card_html(label, val_main, val_sub=None, delta_str=None, delta_color_class="delta-neutral"):
+                sub_html = f'<div class="kpi-value-sub">{val_sub}</div>' if val_sub else ''
+                delta_html = f'<div class="kpi-delta {delta_color_class}">{delta_str}</div>' if delta_str else ''
+                return f"""
+                <div class="kpi-card">
+                    <div class="kpi-label">{label}</div>
+                    <div class="kpi-value-main">{val_main}</div>
+                    {sub_html}
+                    {delta_html}
+                </div>
+                """
 
-            # 判斷是否為「美股僅見」模式
+            k1, k2, k3, k4 = st.columns(4)
             is_us_view = "美股" in view_filter
             
-            # 使用 metric 顯示 (注意：Streamlit metric 不支援換行符號 \n 顯示在 value，所以這裡做字串拼接)
-            # 為了美觀，針對美股模式，我們直接把字串組好塞進去
+            # 準備數據
+            t_usd = totals['usd']
+            t_twd = totals['twd']
             
-            val_mkt = f"US$ {totals['usd']['mkt']:,.0f} / NT$ {totals['twd']['mkt']:,.0f}" if is_us_view else f"NT$ {totals['twd']['mkt']:,.0f}"
-            val_unreal = f"US$ {totals['usd']['unreal']:,.0f} / NT$ {totals['twd']['unreal']:,.0f}" if is_us_view else f"NT$ {totals['twd']['unreal']:,.0f}"
-            val_real = f"US$ {totals['usd']['real']:,.0f} / NT$ {totals['twd']['real']:,.0f}" if is_us_view else f"NT$ {totals['twd']['real']:,.0f}"
-            
-            # 總損益
-            tot_usd = totals['usd']['unreal'] + totals['usd']['real']
-            tot_twd = totals['twd']['unreal'] + totals['twd']['real']
-            val_tot = f"US$ {tot_usd:,.0f} / NT$ {tot_twd:,.0f}" if is_us_view else f"NT$ {tot_twd:,.0f}"
+            # 1. 總市值
+            if is_us_view:
+                with k1: st.markdown(kpi_card_html("總市值", f"US$ {t_usd['mkt']:,.0f}", f"(NT$ {t_twd['mkt']:,.0f})"), unsafe_allow_html=True)
+            else:
+                k1.metric("總市值", f"NT$ {t_twd['mkt']:,.0f}")
 
-            k1.metric("總市值", val_mkt)
-            k2.metric("未實現損益", val_unreal)
-            k3.metric("已實現+股息", val_real)
-            k4.metric("總損益", val_tot)
+            # 2. 未實現損益 (含 Delta)
+            if is_us_view:
+                delta_val = (t_usd['unreal'] / t_usd['mkt'] * 100) if t_usd['mkt'] > 0 else 0
+                delta_str = f"{'↑' if delta_val>0 else '↓'} {delta_val:.1f}%"
+                delta_cls = "delta-pos" if delta_val > 0 else ("delta-neg" if delta_val < 0 else "delta-neutral")
+                # 台股紅漲綠跌邏輯: pos (紅) if > 0
+                with k2: st.markdown(kpi_card_html("未實現損益", f"US$ {t_usd['unreal']:,.0f}", f"(NT$ {t_twd['unreal']:,.0f})", delta_str, delta_cls), unsafe_allow_html=True)
+            else:
+                k2.metric("未實現損益", f"NT$ {t_twd['unreal']:,.0f}", delta=f"{(t_twd['unreal']/t_twd['mkt']*100):.1f}%" if t_twd['mkt']>0 else "0%")
+
+            # 3. 已實現
+            if is_us_view:
+                with k3: st.markdown(kpi_card_html("已實現+股息", f"US$ {t_usd['real']:,.0f}", f"(NT$ {t_twd['real']:,.0f})"), unsafe_allow_html=True)
+            else:
+                k3.metric("已實現+股息", f"NT$ {t_twd['real']:,.0f}")
+
+            # 4. 總損益
+            tot_usd = t_usd['unreal'] + t_usd['real']
+            tot_twd = t_twd['unreal'] + t_twd['real']
+            if is_us_view:
+                with k4: st.markdown(kpi_card_html("總損益", f"US$ {tot_usd:,.0f}", f"(NT$ {tot_twd:,.0f})"), unsafe_allow_html=True)
+            else:
+                k4.metric("總損益", f"NT$ {tot_twd:,.0f}")
 
             st.markdown("---")
             
@@ -696,7 +746,6 @@ with tab4:
             
             st.subheader("📋 資產明細表")
             if not p_df.empty:
-                # 列表顯示邏輯：美股顯示雙幣，台股顯示單幣
                 def format_row(row, col):
                     val = row[col]
                     if row['IsUS']:
@@ -709,8 +758,7 @@ with tab4:
                     display_df[col] = display_df.apply(lambda r: format_row(r, col), axis=1)
                 
                 display_df['庫存'] = display_df['庫存'].apply(lambda x: f"{x:,.0f}")
-                display_df = display_df.drop(columns=['IsUS']) # 隱藏標記欄位
-                
+                display_df = display_df.drop(columns=['IsUS'])
                 st.dataframe(display_df, use_container_width=True)
             else: st.info("無資料")
         else: st.info("該市場無資料")
