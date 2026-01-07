@@ -32,6 +32,17 @@ st.markdown("""
 SHEET_TW = "TW_Trades"
 SHEET_US = "US_Trades"
 
+# --- 內建熱門股字典 (防呆用) ---
+# 當 Excel 沒填且 Yahoo 抓不到時，優先查這裡
+KNOWN_STOCKS = {
+    '0050': '元大台灣50', '0056': '元大高股息', '00878': '國泰永續高股息', 
+    '00929': '復華台灣科技優息', '00919': '群益台灣精選高息', '006208': '富邦台50',
+    '2330': '台積電', '2317': '鴻海', '2454': '聯發科', '2303': '聯電',
+    '2881': '富邦金', '2882': '國泰金', '2891': '中信金', '2886': '兆豐金',
+    '2884': '玉山金', '2412': '中華電', '1101': '台泥', '2002': '中鋼',
+    '2603': '長榮', '2609': '陽明', '2615': '萬海', '3231': '緯創', '2382': '廣達'
+}
+
 @st.cache_resource
 def init_connection():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -97,7 +108,6 @@ def batch_save_data_smart(rows, market_type):
             for _, r in existing_df.iterrows():
                 p = safe_float(r.get('價格', 0))
                 q = safe_float(r.get('股數', 0))
-                # 代號統一轉字串
                 s = str(r.get('代號', '')).strip()
                 sig = (str(r['日期']), s, str(r['類別']), p, q)
                 existing_signatures.add(sig)
@@ -119,17 +129,24 @@ def batch_save_data_smart(rows, market_type):
         st.error(f"批次寫入錯誤: {e}")
         return False, 0, 0
 
-# --- 3. 股票資訊 ---
+# --- 3. 股票資訊 (核心修改：加入字典查詢) ---
 def get_stock_info(symbol):
     try:
+        # 1. 標準化代號
         symbol = str(symbol).strip().upper()
+        clean_symbol = symbol
+        
         if symbol.isdigit():
             clean_symbol = symbol.zfill(4) 
             query_symbol = f"{clean_symbol}.TW"
         else:
-            clean_symbol = symbol
             query_symbol = clean_symbol
             
+        # 2. 【新功能】先查內建字典 (最快最準)
+        if clean_symbol in KNOWN_STOCKS:
+            return query_symbol, KNOWN_STOCKS[clean_symbol], 0, 0
+            
+        # 3. 字典沒有才去問 Yahoo
         stock = yf.Ticker(query_symbol)
         try:
             info = stock.info
@@ -146,7 +163,7 @@ def get_stock_info(symbol):
     except: 
         return symbol, "查無名稱", 0, 0
 
-# --- 4. 技術分析 (修復回傳值錯誤) ---
+# --- 4. 技術分析 (防呆修正) ---
 def calculate_technicals(df):
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
@@ -189,7 +206,6 @@ def analyze_full_signal(symbol):
         stock = yf.Ticker(query_symbol)
         df = stock.history(period="1y")
         
-        # 修正 1: 資料不足時，只回傳兩個 None
         if len(df) < 60: return None, None
         
         df = calculate_technicals(df)
@@ -209,7 +225,6 @@ def analyze_full_signal(symbol):
         elif score <= -2: signal, color = "建議賣出 📉", "#2E7D32"
         else: signal, color = "區間震盪 ☁️", "#666666"
         
-        # 抓取基本面
         try:
             info = stock.info
             pe = info.get('trailingPE', 0)
@@ -225,8 +240,6 @@ def analyze_full_signal(symbol):
             "pe": pe, "yield": yield_rate
         }
         return df, analysis
-    
-    # 修正 2: 發生例外時，也只回傳兩個 None
     except: return None, None
 
 # --- 5. 資產計算 ---
@@ -383,7 +396,7 @@ with tab2:
     }
     
     st.download_button(
-        label="📥 下載完整範本 (.xlsx)",
+        label="📥 下載 Excel 完整範本 (.xlsx)",
         data=convert_to_excel(pd.DataFrame(template_data)),
         file_name="trade_template_full.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -414,12 +427,14 @@ with tab2:
                 else:
                     clean_sym = raw_sym
                 
+                # 名稱邏輯修正：先看 Excel -> 再看字典 -> 最後問 Yahoo
                 excel_name = str(r.get('名稱', '')).strip()
                 if excel_name and excel_name.lower() != 'nan':
                     name = excel_name
                 else:
+                    # 這裡會去呼叫包含 KNOWN_STOCKS 的新函數
                     query_sym = f"{clean_sym}.TW" if clean_sym.isdigit() else clean_sym
-                    _, name, _, _ = get_stock_info(query_sym)
+                    _, name, _, _ = get_stock_info(clean_sym) 
                 
                 tt_raw = str(r['類別'])
                 tt = "買入" if any(x in tt_raw for x in ["Buy","買"]) else "賣出" if any(x in tt_raw for x in ["Sell","賣"]) else "股息"
@@ -458,7 +473,7 @@ with tab2:
             
         except Exception as e: st.error(f"匯入失敗: {str(e)}")
 
-# Tab 3 & 4 (保持不變)
+# Tab 3 & 4 (維持不變)
 with tab3:
     st.markdown("### 🔍 個股全方位診斷")
     market_filter = st.radio("選擇市場", ["全部", "台股 (TW)", "美股 (US)"], horizontal=True)
@@ -502,8 +517,7 @@ with tab3:
                 fig.add_trace(go.Bar(x=hist.index, y=hist['MACD_Hist'], marker_color=colors, name='MACD'), row=3, col=1)
                 fig.update_layout(height=700, template="plotly_white", xaxis_rangeslider_visible=False, showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("查無資料，請檢查代號是否正確。")
+            else: st.warning("查無資料")
 
 with tab4:
     st.markdown("### 💰 資產透視")
