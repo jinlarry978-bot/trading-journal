@@ -335,7 +335,7 @@ def calculate_technicals(df):
 # AI 分析函式
 def ask_gemini_analyst(symbol, name, data_summary):
     try:
-        model = genai.GenerativeModel('gemini-pro')
+        # 建立分析提示詞 (Prompt)
         prompt = f"""
         你是一位專業的台股/美股技術分析師。請根據以下數據，用繁體中文給出一段約 100~150 字的簡短分析與操作建議。
         
@@ -348,12 +348,28 @@ def ask_gemini_analyst(symbol, name, data_summary):
         - 均線位置：月線 {data_summary['ma20']:.2f}, 季線 {data_summary['ma60']:.2f}
         - 布林通道：上軌 {data_summary['bb_u']:.2f}, 下軌 {data_summary['bb_l']:.2f}
         
-        請用專業但口語的語氣，直接講結論：目前趨勢是偏多還是偏空？操作上建議是買進、觀望還是減碼？
+        請直接講結論：目前趨勢偏多/偏空/盤整？操作建議是買進、觀望還是減碼？
         """
-        response = model.generate_content(prompt)
-        return response.text
+
+        # 優先嘗試最新最強的 Gemini 2.0 Flash
+        try:
+            model = genai.GenerativeModel(model_name='gemini-2.0-flash-exp')
+            response = model.generate_content(prompt)
+            return response.text
+        except:
+            # 備案 A：嘗試穩定版 1.5 Flash
+            try:
+                model = genai.GenerativeModel(model_name='gemini-1.5-flash')
+                response = model.generate_content(prompt)
+                return response.text
+            except:
+                # 備案 B：嘗試最舊但最相容的 gemini-pro
+                model = genai.GenerativeModel(model_name='gemini-pro')
+                response = model.generate_content(prompt)
+                return response.text + "\n(註：使用相容模式分析)"
+                
     except Exception as e:
-        return f"AI 連線暫時無法使用 ({str(e)})"
+        return f"AI 引擎啟動失敗。原因：{str(e)}\n提示：請檢查 API Key 是否正確設定在 Secrets 中。"
 
 def analyze_full_signal(symbol):
     try:
