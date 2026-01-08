@@ -132,8 +132,12 @@ def ask_gemini_analyst(symbol, name, data_summary):
             "請給出專業短評、目前趨勢判定與具體操作建議（買進/減碼/觀望），"  
             "約120字繁體中文。"  
         )  
-        # 使用正式穩定模型  
-        model_names = ['gemini-2.0-flash-001']  
+        # ⚠ 修正這裡：只用目前 v1beta / python 套件穩定支援的 model 名稱  
+        model_names = [  
+            "gemini-1.5-flash",  
+            "gemini-1.5-flash-002",  
+            "gemini-pro"  # 舊版，但多半仍可用  
+        ]  
         last_error = None  
         for m_name in model_names:  
             try:  
@@ -1009,7 +1013,6 @@ with tab4:
                             return f"{val:,.0f}"  
                     display_df[col] = display_df.apply(fmt_row, axis=1)  
   
-                # 名稱 + 代號都保留顯示  
                 st.dataframe(  
                     display_df.drop(columns=['IsUS']),  
                     use_container_width=True  
