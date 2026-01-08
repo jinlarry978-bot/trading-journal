@@ -5,4 +5,4 @@ gspread
 oauth2client
 yfinance
 openpyxl
-google-generativeai
+google-generativeai>=0.7.0
