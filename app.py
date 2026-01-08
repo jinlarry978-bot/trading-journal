@@ -79,9 +79,9 @@ def standardize_symbol(symbol):
     s = str(symbol).replace("'", "").strip().upper()  
     if s.isdigit():  
         if len(s) <= 4:  
-            return s.zfill(4)   # 1~4 碼 → 補到 4 碼  
+            return s.zfill(4)  
         else:  
-            return s            # 5 碼（如 00940）等 → 不動  
+            return s  
     return s  
   
 def standardize_date(date_val):  
@@ -147,12 +147,10 @@ def resolve_stock_name(symbol: str) -> str:
     q_sym = f"{clean}.TW" if clean.isdigit() else clean  
     try:  
         stock = yf.Ticker(q_sym)  
-        # 優先使用 fast_info（較輕量）  
         fast_info = getattr(stock, "fast_info", None)  
         if fast_info and isinstance(fast_info, dict):  
             if "shortName" in fast_info:  
                 return fast_info["shortName"]  
-        # 再退回較重的 info  
         info = getattr(stock, "info", {}) or {}  
         return info.get("shortName") or info.get("longName") or clean  
     except:  
@@ -201,35 +199,39 @@ def save_data(row_data):
   
 def batch_save_data(rows, market):  
     if not rows:  
-        return True  
+        return True, 0  
     try:  
         client = init_connection()  
         spreadsheet = client.open("TradeLog")  
         sheet = spreadsheet.worksheet("TW_Trades" if market == 'TW' else "US_Trades")  
         sheet.append_rows(rows)  
         st.cache_data.clear()  
-        return True  
+        return True, len(rows)  
     except Exception as e:  
         st.error(f"批次寫入 {market} 資料失敗：{e}")  
-        return False  
+        return False, 0  
   
 # --- 5. 核心運算 ---  
   
 @st.cache_data(ttl=3600)  
 def get_exchange_rate():  
     try:  
-        # TWD=X：1 USD 可換多少 TWD  
         h = yf.Ticker("TWD=X").history(period="1d")  
         return h['Close'].iloc[-1] if not h.empty else 32.5  
     except:  
         return 32.5  
   
 def calculate_full_portfolio(df, rate):  
+    """  
+    回傳：  
+    - 當前持股明細 DataFrame（含 IsUS）  
+    - totals: {'twd': {...}, 'usd': {...}}  
+    - df_sorted: 整個交易資料（日期排序後）  
+    """  
     portfolio = {}  
     if df.empty:  
         return pd.DataFrame(), {"twd": {}, "usd": {}}, pd.DataFrame()  
   
-    # 日期標準化  
     df['日期'] = pd.to_datetime(df['日期'].apply(standardize_date))  
     df = df.sort_values('日期')  
   
@@ -260,8 +262,13 @@ def calculate_full_portfolio(df, rate):
             p['Realized'] += (q * pr - f - t) - cost_sold  
             p['Qty'] -= q  
             p['Cost'] -= cost_sold  
-        elif "息" in type_str:  
+        elif "現金股息" in type_str or ("股息" in type_str and "現金" not in type_str and "配股" not in type_str):  
+            # 現金股息：記在已實現（股數 q 可視為 1 或實際股數，看你 CSV 填法）  
+            # 這裡沿用你原本邏輯：金額放在「價格」，股數通常 0 或 1  
             p['Realized'] += pr  
+        elif "配股" in type_str:  
+            # 配股 / 股票股利：增加股數，不動成本  
+            p['Qty'] += q  
   
     # 取得現價  
     active_syms = [s for s, v in portfolio.items() if v['Qty'] > 0]  
@@ -428,6 +435,120 @@ def analyze_full_signal(symbol):
     except Exception as e:  
         return None, None, str(e)  
   
+@st.cache_data(ttl=1800)  
+def build_nav_series(trades_df: pd.DataFrame, rate: float):  
+    """  
+    建立簡易資產淨值曲線（TWD）：  
+    - 依日期展開  
+    - 依每日持股數 * 當日收盤價 + 已實現損益（用當下匯率換算 TWD）  
+    """  
+    if trades_df.empty:  
+        return pd.DataFrame()  
+  
+    df = trades_df.copy()  
+    df['日期'] = pd.to_datetime(df['日期'].apply(standardize_date))  
+    df = df.sort_values('日期')  
+  
+    df['代號_std'] = df['代號'].apply(standardize_symbol)  
+    symbols = df['代號_std'].unique().tolist()  
+    if not symbols:  
+        return pd.DataFrame()  
+  
+    min_date = df['日期'].min()  
+    max_date = df['日期'].max()  
+  
+    # 取每檔標的價史  
+    price_dict = {}  
+    for s in symbols:  
+        q_sym = f"{s}.TW" if is_tw_stock(s) and s.isdigit() else s  
+        try:  
+            stock = yf.Ticker(q_sym)  
+            hist = stock.history(start=min_date, end=max_date + datetime.timedelta(days=1))  
+            if not hist.empty:  
+                price_dict[s] = hist['Close']  
+        except:  
+            continue  
+  
+    if not price_dict:  
+        return pd.DataFrame()  
+  
+    # 日期索引：所有價史的 union  
+    all_dates = sorted(set().union(*[ser.index for ser in price_dict.values()]))  
+    if not all_dates:  
+        return pd.DataFrame()  
+  
+    # 狀態  
+    pos = {s: 0.0 for s in symbols}  
+    realized_twd = 0.0  
+  
+    nav_records = []  
+  
+    # 將交易依日期分組  
+    grouped = df.groupby('日期')  
+  
+    for d in all_dates:  
+        date_only = pd.to_datetime(d).normalize()  
+  
+        # 先處理這一天的交易（若有）  
+        if date_only in grouped.groups:  
+            day_trades = grouped.get_group(date_only)  
+            for _, row in day_trades.iterrows():  
+                s = row['代號_std']  
+                q = safe_float(row['股數'])  
+                pr = safe_float(row['價格'])  
+                f = safe_float(row['手續費'])  
+                t = safe_float(row['交易稅'])  
+                type_str = str(row['類別'])  
+                is_us = not is_tw_stock(s)  
+  
+                # 僅記股數與已實現現金流  
+                if "買" in type_str:  
+                    pos[s] += q  
+                    # 現金流出  
+                    cash_flow = -(q * pr + f)  
+                elif "賣" in type_str:  
+                    pos[s] -= q  
+                    cash_flow = (q * pr - f - t)  
+                elif "現金股息" in type_str or ("股息" in type_str and "現金" not in type_str and "配股" not in type_str):  
+                    # 收現金  
+                    cash_flow = pr  
+                elif "配股" in type_str:  
+                    pos[s] += q  
+                    cash_flow = 0  
+                else:  
+                    cash_flow = 0  
+  
+                if cash_flow != 0:  
+                    realized_twd += cash_flow * (rate if is_us else 1.0)  
+  
+        # 算這一天的市值（以當日收盤價 * 持股數）  
+        mkt_twd = 0.0  
+        for s in symbols:  
+            if s not in price_dict:  
+                continue  
+            ser = price_dict[s]  
+            if d not in ser.index:  
+                continue  
+            price = ser.loc[d]  
+            qty = pos.get(s, 0.0)  
+            if qty == 0:  
+                continue  
+            is_us = not is_tw_stock(s)  
+            val = qty * price * (rate if is_us else 1.0)  
+            mkt_twd += val  
+  
+        nav = mkt_twd + realized_twd  
+        nav_records.append({  
+            "日期": date_only,  
+            "市值_TWD": mkt_twd,  
+            "已實現_TWD": realized_twd,  
+            "淨值_TWD": nav  
+        })  
+  
+    nav_df = pd.DataFrame(nav_records).drop_duplicates(subset=['日期'])  
+    nav_df = nav_df.sort_values('日期')  
+    return nav_df  
+  
 # --- 6. 介面呈現 ---  
   
 tab1, tab2, tab3, tab4 = st.tabs([  
@@ -440,18 +561,25 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # --- Tab1：單筆交易記錄 ---  
   
 with tab1:  
-    with st.form("trade_input"):  
-        st.subheader("📝 單筆交易記錄")  
-        c1, c2, c3 = st.columns(3)  
-        ttype = c1.selectbox("交易類別", ["買入", "賣出", "股息/配息"])  
-        tdate = c2.date_input("交易日期")  
-        tsym = c3.text_input("股票代號 (如 2330 或 00940)")  
+    st.subheader("📝 單筆交易記錄")  
   
-        c4, c5, c6, c7 = st.columns(4)  
-        tqty = c4.number_input("股數", min_value=0.0, step=1.0)  
-        tprice = c5.number_input("價格/配息金額", min_value=0.0)  
-        tfee = c6.number_input("手續費", min_value=0.0)  
-        ttax = c7.number_input("交易稅", min_value=0.0)  
+    with st.form("trade_input"):  
+        c1, c2 = st.columns(2)  
+        ttype = c1.selectbox("交易類別", ["買入", "賣出", "現金股息", "配股"])  
+        tdate = c2.date_input("交易日期")  
+  
+        c3, c4 = st.columns(2)  
+        tsym = c3.text_input("股票代號 (如 2330 / 00940 / AAPL)")  
+        tname_hint = c4.text_input("名稱（可留空自動查詢）", "")  
+  
+        c5, c6 = st.columns(2)  
+        tqty = c5.number_input("股數", min_value=0.0, step=1.0)  
+        tprice = c6.number_input("價格/股息金額", min_value=0.0)  
+  
+        with st.expander("進階費用設定（選填）"):  
+            c7, c8 = st.columns(2)  
+            tfee = c7.number_input("手續費", min_value=0.0)  
+            ttax = c8.number_input("交易稅", min_value=0.0)  
   
         submitted = st.form_submit_button("確認送出")  
   
@@ -459,21 +587,29 @@ with tab1:
             if not tsym:  
                 st.warning("請輸入股票代號")  
             else:  
-                # 輕量取得名稱，避免每次新增交易都跑完整技術分析  
-                tname = resolve_stock_name(tsym)  
+                sym_std = standardize_symbol(tsym)  
+                # 名稱處理  
+                if tname_hint.strip():  
+                    tname = tname_hint.strip()  
+                else:  
+                    tname = resolve_stock_name(tsym)  
   
+                # 金額欄位：維持欄位一致，可作為現金流參考  
                 if "買" in ttype:  
                     amt = -(tqty * tprice + tfee)  
                 elif "賣" in ttype:  
                     amt = (tqty * tprice - tfee - ttax)  
-                else:  
-                    # 股息 / 配息  
+                elif "現金股息" in ttype:  
                     amt = tprice  
+                elif "配股" in ttype:  
+                    amt = 0  
+                else:  
+                    amt = 0  
   
                 ok = save_data([  
                     str(tdate),  
                     ttype,  
-                    standardize_symbol(tsym),  
+                    sym_std,  
                     tname,  
                     tprice,  
                     tqty,  
@@ -492,21 +628,23 @@ with tab2:
     st.subheader("📥 批次匯入交易")  
   
     template = pd.DataFrame({  
-        "日期": ["2026-01-01"],  
-        "類別": ["買入"],  
-        "代號": ["2330"],  
-        "名稱": ["台積電"],  
-        "價格": [1000],  
-        "股數": [100],  
-        "手續費": [20],  
-        "交易稅": [0]  
+        "日期": ["2026-01-01", "2026-01-10", "2026-01-15", "2026-01-20"],  
+        "類別": ["買入", "賣出", "現金股息", "配股"],  
+        "代號": ["2330", "2330", "2330", "00940"],  
+        "名稱": ["台積電", "台積電", "台積電", "群益台灣科技優息"],  
+        "價格": [600, 650, 20, 0],  
+        "股數": [100, 50, 0, 500],  
+        "手續費": [20, 20, 0, 0],  
+        "交易稅": [0, 100, 0, 0]  
     })  
   
     st.download_button(  
         "📥 下載 CSV 範本",  
         io.BytesIO(template.to_csv(index=False).encode('utf-8-sig')),  
-        "template.csv"  
+        "trade_template.csv"  
     )  
+  
+    st.markdown("上傳欄位需包含：`日期, 類別, 代號, 名稱, 價格, 股數, 手續費, 交易稅`")  
   
     uploaded = st.file_uploader("上傳 CSV 檔案", type=["csv"])  
   
@@ -517,31 +655,45 @@ with tab2:
             st.error(f"CSV 解析失敗：{e}")  
         else:  
             tw_rows, us_rows = [], []  
-            for _, r in df_u.iterrows():  
-                sym = standardize_symbol(r['代號'])  
-                row = [  
-                    standardize_date(r['日期']),  
-                    r['類別'],  
-                    sym,  
-                    r['名稱'],  
-                    r['價格'],  
-                    r['股數'],  
-                    r['手續費'],  
-                    r['交易稅'],  
-                    0  # 金額暫不使用，維持欄位  
-                ]  
-                if is_tw_stock(sym):  
-                    tw_rows.append(row)  
-                else:  
-                    us_rows.append(row)  
+            error_rows = []  
   
-            ok_tw = batch_save_data(tw_rows, 'TW')  
-            ok_us = batch_save_data(us_rows, 'US')  
+            for idx, r in df_u.iterrows():  
+                try:  
+                    sym = standardize_symbol(r['代號'])  
+                    row = [  
+                        standardize_date(r['日期']),  
+                        r['類別'],  
+                        sym,  
+                        r['名稱'],  
+                        r['價格'],  
+                        r['股數'],  
+                        r['手續費'],  
+                        r['交易稅'],  
+                        0  
+                    ]  
+                    if is_tw_stock(sym):  
+                        tw_rows.append(row)  
+                    else:  
+                        us_rows.append(row)  
+                except Exception as e:  
+                    error_rows.append((idx + 2, str(e)))  # +2：含標題列  
   
-            if ok_tw and ok_us:  
+            ok_tw, n_tw = batch_save_data(tw_rows, 'TW')  
+            ok_us, n_us = batch_save_data(us_rows, 'US')  
+  
+            st.write("---")  
+            st.markdown("### 匯入結果總結")  
+            st.write(f"- TW_Trades 成功筆數：{n_tw}（成功：{ok_tw}）")  
+            st.write(f"- US_Trades 成功筆數：{n_us}（成功：{ok_us}）")  
+  
+            if error_rows:  
+                st.warning(f"有 {len(error_rows)} 筆列解析失敗：")  
+                for row_no, msg in error_rows[:20]:  
+                    st.write(f"- 第 {row_no} 列：{msg}")  
+                if len(error_rows) > 20:  
+                    st.write(f"... 其餘 {len(error_rows) - 20} 筆省略顯示")  
+            elif ok_tw and ok_us:  
                 st.success("✅ 批次匯入完成！")  
-            else:  
-                st.warning("部分資料匯入失敗，請檢查錯誤訊息。")  
   
 # --- Tab3：趨勢戰情診斷 ---  
   
@@ -550,7 +702,6 @@ with tab3:
   
     raw_for_filter = load_data()  
   
-    # 庫存快選（只顯示目前仍有持股的代號）  
     inv = {}  
     for _, r in raw_for_filter.iterrows():  
         s = standardize_symbol(r['代號'])  
@@ -559,15 +710,22 @@ with tab3:
             inv[s] = inv.get(s, 0) + q  
         elif "賣" in str(r['類別']):  
             inv[s] = inv.get(s, 0) - q  
+        elif "配股" in str(r['類別']):  
+            inv[s] = inv.get(s, 0) + q  
     held_stocks = [s for s, q in inv.items() if q > 0]  
   
-    sel_col, search_col = st.columns([1, 1])  
-    with sel_col:  
-        sel_sym = st.selectbox("🎯 庫存快速診斷", ["請選擇"] + held_stocks)  
-    with search_col:  
-        search_sym = st.text_input("🔍 搜尋代號 (如 AAPL、2330 或 00940)", "")  
+    st.markdown("#### 🔎 選擇診斷標的")  
+    mode = st.radio("選擇方式", ["從目前持股選", "手動輸入代號"], horizontal=True)  
   
-    target = search_sym if search_sym else (sel_sym if sel_sym != "請選擇" else None)  
+    target = None  
+    if mode == "從目前持股選":  
+        sel_sym = st.selectbox("🎯 庫存快速診斷", ["請選擇"] + held_stocks)  
+        if sel_sym != "請選擇":  
+            target = sel_sym  
+    else:  
+        search_sym = st.text_input("🔍 手動輸入代號 (如 AAPL、2330、00940)", "")  
+        if search_sym.strip():  
+            target = search_sym.strip()  
   
     if target:  
         with st.spinner("正在生成深度診斷報告..."):  
@@ -629,8 +787,7 @@ with tab3:
                     unsafe_allow_html=True  
                 )  
   
-            # K 線 + 成交量圖（手機上高度略縮小）  
-            fig_height = 550  
+            # K 線 + 成交量圖  
             fig = make_subplots(  
                 rows=2,  
                 cols=1,  
@@ -677,9 +834,10 @@ with tab3:
                 row=2, col=1  
             )  
             fig.update_layout(  
-                height=fig_height,  
+                height=550,  
                 template="plotly_white",  
                 xaxis_rangeslider_visible=False,  
+                hovermode="x unified",  
                 margin=dict(l=10, r=10, t=10, b=10)  
             )  
             st.plotly_chart(fig, use_container_width=True)  
@@ -695,72 +853,235 @@ with tab4:
     raw_df = load_data()  
   
     if not raw_df.empty:  
-        p_df, totals, _ = calculate_full_portfolio(raw_df, rate)  
+        p_df_all, totals_all, df_sorted = calculate_full_portfolio(raw_df, rate)  
   
-        # KPI 卡片渲染  
-        def render_kpi(label, usd, twd, d=None):  
-            if d is not None:  
-                cls = "pos" if d > 0 else "neg"  
-                arrow = "↑" if d > 0 else "↓"  
-                dt = f'<div class="delta-text {cls}">{arrow} {abs(d):.1f}%</div>'  
+        # 市場篩選：全部 / 台股 / 美股  
+        st.markdown("#### 🔍 市場篩選")  
+        market_view = st.radio(  
+            "選擇要看的市場",  
+            ["全部", "僅台股", "僅美股"],  
+            horizontal=True  
+        )  
+  
+        if p_df_all.empty:  
+            st.info("目前沒有任何持股。")  
+        else:  
+            if market_view == "僅台股":  
+                p_df = p_df_all[~p_df_all['IsUS']].copy()  
+            elif market_view == "僅美股":  
+                p_df = p_df_all[p_df_all['IsUS']].copy()  
             else:  
-                dt = ""  
-            st.markdown(  
-                f'''  
-                <div class="custom-kpi-card">  
-                    <div class="kpi-label">{label}</div>  
-                    <div class="kpi-val-usd">US$ {usd:,.0f}</div>  
-                    <div class="kpi-val-twd">≈ NT$ {twd:,.0f}</div>  
-                    {dt}  
-                </div>  
-                ''',  
-                unsafe_allow_html=True  
-            )  
+                p_df = p_df_all.copy()  
   
-        k1, k2, k3, k4 = st.columns(4)  
-        with k1:  
-            render_kpi("資產總市值", totals['usd'].get('mkt', 0), totals['twd'].get('mkt', 0))  
-        with k2:  
-            mkt_usd = totals['usd'].get('mkt', 0)  
-            unreal_usd = totals['usd'].get('unreal', 0)  
-            d_p = (unreal_usd / mkt_usd * 100) if mkt_usd > 0 else 0  
-            render_kpi("未實現損益", unreal_usd, totals['twd'].get('unreal', 0), d=d_p)  
-        with k3:  
-            render_kpi(  
-                "累計已實現+息",  
-                totals['usd'].get('real', 0),  
-                totals['twd'].get('real', 0)  
-            )  
-        with k4:  
-            total_unreal = totals['usd'].get('unreal', 0)  
-            total_real = totals['usd'].get('real', 0)  
-            total_unreal_twd = totals['twd'].get('unreal', 0)  
-            total_real_twd = totals['twd'].get('real', 0)  
-            render_kpi(  
-                "總累計淨損益",  
-                total_unreal + total_real,  
-                total_unreal_twd + total_real_twd  
-            )  
+            # 重新計算 totals 依照篩選後持股  
+            t_twd = {'mkt': 0, 'unreal': 0, 'real': 0}  
+            t_usd = {'mkt': 0, 'unreal': 0, 'real': 0}  
+            for _, r in p_df.iterrows():  
+                mkt = r['市值']  
+                unreal = r['未實現']  
+                real = r['已實現+息']  
+                if r['IsUS']:  
+                    t_usd['mkt'] += mkt  
+                    t_usd['unreal'] += unreal  
+                    t_usd['real'] += real  
   
-        st.write("---")  
-        st.subheader("📋 現存持倉明細")  
+                    t_twd['mkt'] += mkt * rate  
+                    t_twd['unreal'] += unreal * rate  
+                    t_twd['real'] += real * rate  
+                else:  
+                    t_twd['mkt'] += mkt  
+                    t_twd['unreal'] += unreal  
+                    t_twd['real'] += real  
   
-        if not p_df.empty:  
-            display_df = p_df[p_df['庫存'] > 0].copy()  
+            # KPI 卡片渲染  
+            def render_kpi(label, usd, twd, d=None):  
+                if d is not None:  
+                    cls = "pos" if d > 0 else "neg"  
+                    arrow = "↑" if d > 0 else "↓"  
+                    dt = f'<div class="delta-text {cls}">{arrow} {abs(d):.1f}%</div>'  
+                else:  
+                    dt = ""  
+                st.markdown(  
+                    f'''  
+                    <div class="custom-kpi-card">  
+                        <div class="kpi-label">{label}</div>  
+                        <div class="kpi-val-usd">US$ {usd:,.0f}</div>  
+                        <div class="kpi-val-twd">≈ NT$ {twd:,.0f}</div>  
+                        {dt}  
+                    </div>  
+                    ''',  
+                    unsafe_allow_html=True  
+                )  
   
-            # 顯示同時含 USD 與 TWD 的數字  
-            for col in ['市值', '未實現', '已實現+息']:  
-                def fmt_row(r):  
-                    val = r[col]  
-                    if r['IsUS']:  
-                        return f"${val:,.0f} (NT${val * rate:,.0f})"  
-                    else:  
-                        return f"{val:,.0f}"  
-                display_df[col] = display_df.apply(fmt_row, axis=1)  
+            k1, k2, k3, k4 = st.columns(4)  
+            with k1:  
+                render_kpi("資產總市值", t_usd.get('mkt', 0), t_twd.get('mkt', 0))  
+            with k2:  
+                mkt_usd = t_usd.get('mkt', 0)  
+                unreal_usd = t_usd.get('unreal', 0)  
+                d_p = (unreal_usd / mkt_usd * 100) if mkt_usd > 0 else 0  
+                render_kpi("未實現損益", unreal_usd, t_twd.get('unreal', 0), d=d_p)  
+            with k3:  
+                render_kpi(  
+                    "累計已實現+息",  
+                    t_usd.get('real', 0),  
+                    t_twd.get('real', 0)  
+                )  
+            with k4:  
+                total_unreal = t_usd.get('unreal', 0)  
+                total_real = t_usd.get('real', 0)  
+                total_unreal_twd = t_twd.get('unreal', 0)  
+                total_real_twd = t_twd.get('real', 0)  
+                render_kpi(  
+                    "總累計淨損益",  
+                    total_unreal + total_real,  
+                    total_unreal_twd + total_real_twd  
+                )  
   
-            st.dataframe(  
-                display_df.drop(columns=['IsUS']),  
-                use_container_width=True  
-            )  
+            st.write("---")  
+  
+            # 圓餅圖：持股市值分布  
+            st.markdown("#### 🥧 持股市值分布")  
+            pie_df = p_df[p_df['庫存'] > 0].copy()  
+            if not pie_df.empty:  
+                pie_df['市值_TWD'] = pie_df.apply(  
+                    lambda r: r['市值'] * (rate if r['IsUS'] else 1.0),  
+                    axis=1  
+                )  
+                fig_pie = go.Figure(  
+                    data=[go.Pie(  
+                        labels=pie_df['名稱'] + " (" + pie_df['代號'] + ")",  
+                        values=pie_df['市值_TWD'],  
+                        hole=0.3  
+                    )]  
+                )  
+                fig_pie.update_layout(height=400, margin=dict(l=10, r=10, t=10, b=10))  
+                st.plotly_chart(fig_pie, use_container_width=True)  
+            else:  
+                st.info("目前無持股，無法顯示資產分布。")  
+  
+            # 資產淨值曲線  
+            st.markdown("#### 📈 資產淨值曲線（TWD）")  
+            try:  
+                nav_df = build_nav_series(raw_df, rate)  
+                if not nav_df.empty:  
+                    fig_nav = go.Figure()  
+                    fig_nav.add_trace(  
+                        go.Scatter(  
+                            x=nav_df['日期'],  
+                            y=nav_df['淨值_TWD'],  
+                            mode='lines',  
+                            name='淨值'  
+                        )  
+                    )  
+                    fig_nav.update_layout(  
+                        height=400,  
+                        template="plotly_white",  
+                        margin=dict(l=10, r=10, t=10, b=10)  
+                    )  
+                    st.plotly_chart(fig_nav, use_container_width=True)  
+                else:  
+                    st.info("目前淨值曲線資料不足。")  
+            except Exception as e:  
+                st.warning(f"資產淨值曲線生成失敗：{e}")  
+  
+            st.write("---")  
+            st.subheader("📋 現存持倉明細")  
+  
+            if not p_df.empty:  
+                display_df = p_df[p_df['庫存'] > 0].copy()  
+  
+                for col in ['市值', '未實現', '已實現+息']:  
+                    def fmt_row(r):  
+                        val = r[col]  
+                        if r['IsUS']:  
+                            return f"${val:,.0f} (NT${val * rate:,.0f})"  
+                        else:  
+                            return f"{val:,.0f}"  
+                    display_df[col] = display_df.apply(fmt_row, axis=1)  
+  
+                st.dataframe(  
+                    display_df.drop(columns=['IsUS']),  
+                    use_container_width=True  
+                )  
+  
+            # 單檔個股損益明細  
+            st.write("---")  
+            st.markdown("#### 🎯 單檔個股損益明細")  
+  
+            all_syms = sorted(raw_df['代號'].apply(standardize_symbol).unique().tolist())  
+            sel_single = st.selectbox("選擇標的查看詳細損益", ["請選擇"] + all_syms)  
+  
+            if sel_single != "請選擇":  
+                sym_std = sel_single  
+                sub = raw_df[raw_df['代號'].apply(standardize_symbol) == sym_std].copy()  
+                if not sub.empty:  
+                    sub['日期'] = pd.to_datetime(sub['日期'].apply(standardize_date))  
+                    sub = sub.sort_values('日期')  
+  
+                    # 簡單損益計算（重跑一遍該標的的邏輯）  
+                    qty = 0.0  
+                    cost = 0.0  
+                    realized = 0.0  
+  
+                    for _, row in sub.iterrows():  
+                        q = safe_float(row['股數'])  
+                        pr = safe_float(row['價格'])  
+                        f = safe_float(row['手續費'])  
+                        t = safe_float(row['交易稅'])  
+                        tp = str(row['類別'])  
+  
+                        if "買" in tp:  
+                            cost += q * pr + f  
+                            qty += q  
+                        elif "賣" in tp and qty > 0:  
+                            avg = cost / qty  
+                            cost_sold = avg * q  
+                            realized += (q * pr - f - t) - cost_sold  
+                            qty -= q  
+                            cost -= cost_sold  
+                        elif "現金股息" in tp or ("股息" in tp and "現金" not in tp and "配股" not in tp):  
+                            realized += pr  
+                        elif "配股" in tp:  
+                            qty += q  
+  
+                    # 現價  
+                    q_sym = f"{sym_std}.TW" if is_tw_stock(sym_std) and sym_std.isdigit() else sym_std  
+                    try:  
+                        stock = yf.Ticker(q_sym)  
+                        h = stock.history(period="1d")  
+                        cur_price = h['Close'].iloc[-1] if not h.empty else 0.0  
+                    except:  
+                        cur_price = 0.0  
+  
+                    is_us = not is_tw_stock(sym_std)  
+                    mkt_val = qty * cur_price  
+                    mkt_val_twd = mkt_val * (rate if is_us else 1.0)  
+                    cost_twd = cost * (rate if is_us else 1.0)  
+                    realized_twd = realized * (rate if is_us else 1.0)  
+                    total_pnl_twd = (mkt_val_twd - cost_twd) + realized_twd  
+                    total_invest = cost_twd  
+                    total_ret = (total_pnl_twd / total_invest * 100) if total_invest > 0 else 0  
+  
+                    c1, c2, c3, c4 = st.columns(4)  
+                    with c1:  
+                        st.metric("目前股數", f"{qty:,.0f}")  
+                    with c2:  
+                        st.metric("現價", f"{cur_price:,.2f}")  
+                    with c3:  
+                        st.metric("市值 (TWD)", f"{mkt_val_twd:,.0f}")  
+                    with c4:  
+                        st.metric("總報酬率", f"{total_ret:,.1f}%")  
+  
+                    c5, c6 = st.columns(2)  
+                    with c5:  
+                        st.metric("累計投入成本 (TWD)", f"{cost_twd:,.0f}")  
+                    with c6:  
+                        st.metric("累計已實現+息 (TWD)", f"{realized_twd:,.0f}")  
+  
+                    st.markdown("##### 交易明細")  
+                    st.dataframe(sub, use_container_width=True)  
+                else:  
+                    st.info("找不到該標的的交易紀錄。")  
     else:  
         st.info("尚未有任何交易紀錄，請先在「交易錄入」或「批次匯入」新增資料。")
