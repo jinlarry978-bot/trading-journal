@@ -121,6 +121,9 @@ def init_gemini():
     return False  
   
 def ask_gemini_analyst(symbol, name, data_summary):  
+    """  
+    回傳 AI 分析文字。若全部模型都失敗，回傳帶有說明的錯誤訊息。  
+    """  
     try:  
         prompt = (  
             f"你是一位資深投資顧問。請分析標的：{symbol} {name}。"  
@@ -129,14 +132,20 @@ def ask_gemini_analyst(symbol, name, data_summary):
             "請給出專業短評、目前趨勢判定與具體操作建議（買進/減碼/觀望），"  
             "約120字繁體中文。"  
         )  
-        for m_name in ['gemini-2.0-flash-exp', 'gemini-1.5-flash', 'gemini-pro']:  
+        # 使用正式穩定模型  
+        model_names = ['gemini-1.5-flash', 'gemini-1.5-pro']  
+        last_error = None  
+        for m_name in model_names:  
             try:  
                 model = genai.GenerativeModel(model_name=m_name)  
                 response = model.generate_content(prompt)  
-                if response.text:  
+                if response and getattr(response, "text", None):  
                     return f"{response.text}\n\n(AI引擎: {m_name})"  
-            except:  
+            except Exception as e:  
+                last_error = str(e)  
                 continue  
+        if last_error:  
+            return f"AI 分析暫時不可用，請稍後重試。（錯誤：{last_error}）"  
         return "AI 分析暫時不可用，請稍後重試。"  
     except Exception as e:  
         return f"AI 連線錯誤: {str(e)}"  
@@ -239,7 +248,7 @@ def calculate_full_portfolio(df, rate):
         sym = standardize_symbol(row['代號'])  
         if sym not in portfolio:  
             portfolio[sym] = {  
-                'Name': row['名稱'],  
+                'Name': row.get('名稱', sym),  
                 'Qty': 0,  
                 'Cost': 0,  
                 'Realized': 0,  
@@ -263,11 +272,8 @@ def calculate_full_portfolio(df, rate):
             p['Qty'] -= q  
             p['Cost'] -= cost_sold  
         elif "現金股息" in type_str or ("股息" in type_str and "現金" not in type_str and "配股" not in type_str):  
-            # 現金股息：記在已實現（股數 q 可視為 1 或實際股數，看你 CSV 填法）  
-            # 這裡沿用你原本邏輯：金額放在「價格」，股數通常 0 或 1  
             p['Realized'] += pr  
         elif "配股" in type_str:  
-            # 配股 / 股票股利：增加股數，不動成本  
             p['Qty'] += q  
   
     # 取得現價  
@@ -409,7 +415,7 @@ def analyze_full_signal(symbol):
         try:  
             fast_info = getattr(stock, "fast_info", None)  
             if fast_info and isinstance(fast_info, dict):  
-                name = fast_info.get("shortName")  
+                name = fast_info.get('shortName')  
         except:  
             pass  
   
@@ -477,19 +483,16 @@ def build_nav_series(trades_df: pd.DataFrame, rate: float):
     if not all_dates:  
         return pd.DataFrame()  
   
-    # 狀態  
     pos = {s: 0.0 for s in symbols}  
     realized_twd = 0.0  
   
     nav_records = []  
-  
-    # 將交易依日期分組  
     grouped = df.groupby('日期')  
   
     for d in all_dates:  
         date_only = pd.to_datetime(d).normalize()  
   
-        # 先處理這一天的交易（若有）  
+        # 當日交易  
         if date_only in grouped.groups:  
             day_trades = grouped.get_group(date_only)  
             for _, row in day_trades.iterrows():  
@@ -501,16 +504,13 @@ def build_nav_series(trades_df: pd.DataFrame, rate: float):
                 type_str = str(row['類別'])  
                 is_us = not is_tw_stock(s)  
   
-                # 僅記股數與已實現現金流  
                 if "買" in type_str:  
                     pos[s] += q  
-                    # 現金流出  
                     cash_flow = -(q * pr + f)  
                 elif "賣" in type_str:  
                     pos[s] -= q  
                     cash_flow = (q * pr - f - t)  
                 elif "現金股息" in type_str or ("股息" in type_str and "現金" not in type_str and "配股" not in type_str):  
-                    # 收現金  
                     cash_flow = pr  
                 elif "配股" in type_str:  
                     pos[s] += q  
@@ -521,7 +521,7 @@ def build_nav_series(trades_df: pd.DataFrame, rate: float):
                 if cash_flow != 0:  
                     realized_twd += cash_flow * (rate if is_us else 1.0)  
   
-        # 算這一天的市值（以當日收盤價 * 持股數）  
+        # 市值  
         mkt_twd = 0.0  
         for s in symbols:  
             if s not in price_dict:  
@@ -588,13 +588,11 @@ with tab1:
                 st.warning("請輸入股票代號")  
             else:  
                 sym_std = standardize_symbol(tsym)  
-                # 名稱處理  
                 if tname_hint.strip():  
                     tname = tname_hint.strip()  
                 else:  
                     tname = resolve_stock_name(tsym)  
   
-                # 金額欄位：維持欄位一致，可作為現金流參考  
                 if "買" in ttype:  
                     amt = -(tqty * tprice + tfee)  
                 elif "賣" in ttype:  
@@ -618,7 +616,7 @@ with tab1:
                     amt  
                 ])  
                 if ok:  
-                    st.success("✅ 記錄已成功儲存！")  
+                    st.success(f"✅ 記錄已成功儲存：{sym_std} {tname}")  
                 else:  
                     st.error("❌ 記錄儲存失敗，請稍後再試或檢查連線設定。")  
   
@@ -702,6 +700,12 @@ with tab3:
   
     raw_for_filter = load_data()  
   
+    # 代號 → 名稱 映射  
+    names_map = {}  
+    for _, r in raw_for_filter.iterrows():  
+        s = standardize_symbol(r['代號'])  
+        names_map[s] = r.get('名稱', s)  
+  
     inv = {}  
     for _, r in raw_for_filter.iterrows():  
         s = standardize_symbol(r['代號'])  
@@ -712,16 +716,17 @@ with tab3:
             inv[s] = inv.get(s, 0) - q  
         elif "配股" in str(r['類別']):  
             inv[s] = inv.get(s, 0) + q  
-    held_stocks = [s for s, q in inv.items() if q > 0]  
+    held_syms = sorted([s for s, q in inv.items() if q > 0])  
   
     st.markdown("#### 🔎 選擇診斷標的")  
     mode = st.radio("選擇方式", ["從目前持股選", "手動輸入代號"], horizontal=True)  
   
     target = None  
     if mode == "從目前持股選":  
-        sel_sym = st.selectbox("🎯 庫存快速診斷", ["請選擇"] + held_stocks)  
-        if sel_sym != "請選擇":  
-            target = sel_sym  
+        options = ["請選擇"] + [f"{s} {names_map.get(s, '')}" for s in held_syms]  
+        sel_label = st.selectbox("🎯 庫存快速診斷", options)  
+        if sel_label != "請選擇":  
+            target = sel_label.split()[0]  # 前半段為代號  
     else:  
         search_sym = st.text_input("🔍 手動輸入代號 (如 AAPL、2330、00940)", "")  
         if search_sym.strip():  
@@ -734,6 +739,8 @@ with tab3:
         if err:  
             st.warning(f"無法完成技術分析：{err}")  
         elif hist is not None and ana is not None:  
+            st.markdown(f"### {ana['name']}（{ana['symbol']}）趨勢診斷")  
+  
             # 指標區塊  
             m1, m2, m3, m4 = st.columns(4)  
             m1.metric("目前股價", f"{ana['metrics']['close']:.2f}")  
@@ -744,7 +751,7 @@ with tab3:
                 "中軌上方" if ana['metrics']['close'] > hist['MA20'].iloc[-1] else "中軌下方"  
             )  
   
-            # AI 分析（可選）  
+            # AI 分析  
             if init_gemini():  
                 if st.button("🤖 啟動 AI 深度投顧分析"):  
                     with st.spinner("AI 分析師正在閱讀 K 線圖..."):  
@@ -757,6 +764,8 @@ with tab3:
                             f'<div class="ai-box"><b>🤖 AI 投顧觀點：</b><br>{res}</div>',  
                             unsafe_allow_html=True  
                         )  
+            else:  
+                st.info("尚未設定 GEMINI_API_KEY，無法啟用 AI 投顧分析。")  
   
             # 策略卡片  
             s1, s2 = st.columns(2)  
@@ -1000,6 +1009,7 @@ with tab4:
                             return f"{val:,.0f}"  
                     display_df[col] = display_df.apply(fmt_row, axis=1)  
   
+                # 名稱 + 代號都保留顯示  
                 st.dataframe(  
                     display_df.drop(columns=['IsUS']),  
                     use_container_width=True  
@@ -1009,17 +1019,23 @@ with tab4:
             st.write("---")  
             st.markdown("#### 🎯 單檔個股損益明細")  
   
-            all_syms = sorted(raw_df['代號'].apply(standardize_symbol).unique().tolist())  
-            sel_single = st.selectbox("選擇標的查看詳細損益", ["請選擇"] + all_syms)  
+            # 代號→名稱 map  
+            name_map_all = {}  
+            for _, r in raw_df.iterrows():  
+                s = standardize_symbol(r['代號'])  
+                name_map_all[s] = r.get('名稱', s)  
   
-            if sel_single != "請選擇":  
-                sym_std = sel_single  
+            all_syms = sorted(set(standardize_symbol(x) for x in raw_df['代號'].tolist()))  
+            options_single = ["請選擇"] + [f"{s} {name_map_all.get(s, '')}" for s in all_syms]  
+            sel_label = st.selectbox("選擇標的查看詳細損益", options_single)  
+  
+            if sel_label != "請選擇":  
+                sym_std = sel_label.split()[0]  
                 sub = raw_df[raw_df['代號'].apply(standardize_symbol) == sym_std].copy()  
                 if not sub.empty:  
                     sub['日期'] = pd.to_datetime(sub['日期'].apply(standardize_date))  
                     sub = sub.sort_values('日期')  
   
-                    # 簡單損益計算（重跑一遍該標的的邏輯）  
                     qty = 0.0  
                     cost = 0.0  
                     realized = 0.0  
@@ -1045,7 +1061,6 @@ with tab4:
                         elif "配股" in tp:  
                             qty += q  
   
-                    # 現價  
                     q_sym = f"{sym_std}.TW" if is_tw_stock(sym_std) and sym_std.isdigit() else sym_std  
                     try:  
                         stock = yf.Ticker(q_sym)  
@@ -1062,6 +1077,9 @@ with tab4:
                     total_pnl_twd = (mkt_val_twd - cost_twd) + realized_twd  
                     total_invest = cost_twd  
                     total_ret = (total_pnl_twd / total_invest * 100) if total_invest > 0 else 0  
+  
+                    show_name = name_map_all.get(sym_std, sym_std)  
+                    st.markdown(f"##### {show_name}（{sym_std}）損益概覽")  
   
                     c1, c2, c3, c4 = st.columns(4)  
                     with c1:  
