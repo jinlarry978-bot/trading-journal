@@ -134,7 +134,7 @@ def ask_gemini_analyst(symbol, name, data_summary):
         )  
         # ⚠ 修正這裡：只用目前 v1beta / python 套件穩定支援的 model 名稱  
         model_names = [  
-            "gemini-flash-latest"
+            "gemini-3-flash-preview"
         ]  
         last_error = None  
         for m_name in model_names:  
