@@ -335,7 +335,7 @@ def calculate_technicals(df):
 # AI 分析函式
 def ask_gemini_analyst(symbol, name, data_summary):
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-pro')
         prompt = f"""
         你是一位專業的台股/美股技術分析師。請根據以下數據，用繁體中文給出一段約 100~150 字的簡短分析與操作建議。
         
