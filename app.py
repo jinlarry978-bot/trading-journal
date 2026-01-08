@@ -133,7 +133,7 @@ def ask_gemini_analyst(symbol, name, data_summary):
             "約120字繁體中文。"  
         )  
         # 使用正式穩定模型  
-        model_names = ['gemini-1.5-flash', 'gemini-1.5-pro']  
+        model_names = ['gemini-2.0-flash-001']  
         last_error = None  
         for m_name in model_names:  
             try:  
