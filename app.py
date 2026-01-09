@@ -315,46 +315,63 @@ tab1, tab2, tab3, tab4 = st.tabs(["📝 交易錄入", "📥 批次匯入", "�
 with tab1:
     st.subheader("📝 交易錄入")
     
-    # 使用 Session State 來處理自動帶入
+    # 1. 初始化 Session State (用於自動更新欄位)
     if 'input_sym' not in st.session_state: st.session_state.input_sym = ""
     if 'auto_name' not in st.session_state: st.session_state.auto_name = ""
+    if 't_date' not in st.session_state: st.session_state.t_date = datetime.date.today()
 
+    # 2. 定義回調函數：當代號改變時，自動去抓名稱
     def on_sym_change():
         sym = st.session_state.input_sym
         if sym:
-            st.session_state.auto_name = fetch_name_only(sym)
+            # 呼叫您原本定義好的 fetch_name_only 函數
+            found_name = fetch_name_only(sym)
+            st.session_state.auto_name = found_name
 
-    with st.form("entry"):
-        c1, c2 = st.columns(2)
-        ttype = c1.selectbox("交易類別", ["買入", "賣出", "現金股息", "配股"])
-        tdate = c2.date_input("日期")
-        
-        c3, c4 = st.columns(2)
-        # key 綁定 session_state，on_change 綁定 callback
-        tsym = c3.text_input("股票代號 (Enter後自動帶入名稱)", key="input_sym", on_change=on_sym_change)
-        tname = c4.text_input("股票名稱", key="auto_name")
-        
-        c5, c6 = st.columns(2)
-        tqty = c5.number_input("股數", min_value=0.0)
-        tprice = c6.number_input("價格/總金額", min_value=0.0)
-        
-        c7, c8 = st.columns(2)
-        tfee = c7.number_input("手續費", 0.0)
-        ttax = c8.number_input("交易稅", 0.0)
-        
-        if st.form_submit_button("💾 儲存交易"):
-            if tsym:
-                final_name = tname if tname else fetch_name_only(tsym)
-                amt = 0
-                if "買" in ttype: amt = -(tqty*tprice + tfee)
-                elif "賣" in ttype: amt = (tqty*tprice - tfee - ttax)
-                elif "現金" in ttype: amt = tprice
-                
-                row = [str(tdate), ttype, standardize_symbol(tsym), final_name, tprice, tqty, tfee, ttax, amt]
-                if save_data(row):
-                    st.success(f"已儲存 {final_name}")
+    # 3. 移除 st.form，直接使用佈局 (這樣 on_change 才會生效)
+    c1, c2 = st.columns(2)
+    ttype = c1.selectbox("交易類別", ["買入", "賣出", "現金股息", "配股"])
+    tdate = c2.date_input("日期", value=st.session_state.t_date)
+    
+    c3, c4 = st.columns(2)
+    # 這裡的 on_change 現在可以正常運作了
+    tsym = c3.text_input(
+        "股票代號 (Enter後自動帶入名稱)", 
+        key="input_sym", 
+        on_change=on_sym_change
+    )
+    tname = c4.text_input("股票名稱", key="auto_name")
+    
+    c5, c6 = st.columns(2)
+    tqty = c5.number_input("股數", min_value=0.0)
+    tprice = c6.number_input("價格/總金額", min_value=0.0)
+    
+    c7, c8 = st.columns(2)
+    tfee = c7.number_input("手續費", 0.0)
+    ttax = c8.number_input("交易稅", 0.0)
+    
+    st.write("") # 間隔
+    
+    # 4. 改用一般的 Button 來儲存
+    if st.button("💾 儲存交易", type="primary", use_container_width=True):
+        if tsym:
+            final_name = tname if tname else fetch_name_only(tsym)
+            amt = 0
+            # 計算金額邏輯
+            if "買" in ttype: amt = -(tqty*tprice + tfee)
+            elif "賣" in ttype: amt = (tqty*tprice - tfee - ttax)
+            elif "現金" in ttype: amt = tprice
+            
+            row = [str(tdate), ttype, standardize_symbol(tsym), final_name, tprice, tqty, tfee, ttax, amt]
+            
+            if save_data(row):
+                st.success(f"✅ 已儲存：{final_name} ({tsym})")
+                time.sleep(1) # 讓使用者看到成功訊息
+                st.rerun()    # 重新整理頁面以清空欄位或更新顯示
             else:
-                st.warning("請輸入代號")
+                st.error("❌ 儲存失敗，請檢查網路連線")
+        else:
+            st.warning("⚠️ 請輸入股票代號")
 
 # --- Tab 2: 批次匯入 (xlsx + 00919 fix) ---
 with tab2:
