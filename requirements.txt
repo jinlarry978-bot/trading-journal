@@ -4,5 +4,5 @@ plotly
 gspread
 oauth2client
 yfinance
+google-generativeai
 openpyxl
-google-generativeai>=0.8.3
